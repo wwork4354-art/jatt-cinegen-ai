@@ -1,0 +1,8 @@
+{
+  "name": "Jatt CineGen AI",
+  "description": "Modern dark-mode AI image and video generation studio with Full HD export, prompt enhancement, and creations gallery.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
