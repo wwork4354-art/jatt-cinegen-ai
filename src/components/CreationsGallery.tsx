@@ -8,6 +8,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react';
+import type { UIStrings } from '../lib/i18n';
 import type { CreationItem } from '../types/studio';
 
 interface CreationsGalleryProps {
@@ -17,6 +18,7 @@ interface CreationsGalleryProps {
   onShare: (item: CreationItem) => void;
   onDelete: (id: string) => void;
   onStartCreating: () => void;
+  strings: UIStrings;
 }
 
 export function CreationsGallery({
@@ -26,6 +28,7 @@ export function CreationsGallery({
   onShare,
   onDelete,
   onStartCreating,
+  strings,
 }: CreationsGalleryProps) {
   const [filter, setFilter] = useState<'all' | 'image' | 'video'>('all');
   const [search, setSearch] = useState('');
@@ -42,16 +45,16 @@ export function CreationsGallery({
   return (
     <section
       aria-label="My Creations gallery"
-      className="space-y-6 rounded-2xl border border-white/[0.08] bg-[#0D1118] p-5 sm:p-7"
+      className="space-y-6 rounded-2xl border border-white/[0.08] bg-[#0D1118] p-4 sm:p-7"
     >
       {/* Header & Controls */}
       <div className="flex flex-col gap-4 border-b border-white/[0.08] pb-5 md:flex-row md:items-center md:justify-between">
         <div className="space-y-1">
           <h1 className="font-display text-2xl font-semibold tracking-tight text-white">
-            My Creations
+            {strings.creationsTitle}
           </h1>
           <p className="text-sm text-slate-400">
-            All generated images and videos are stored locally in your browser for instant Full HD export.
+            {strings.creationsSubtitle}
           </p>
         </div>
 
@@ -62,7 +65,7 @@ export function CreationsGallery({
               type="search"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search prompts..."
+              placeholder={strings.searchPlaceholder}
               className="min-h-[40px] w-full rounded-xl border border-white/10 bg-[#07090E] pl-9 pr-3 py-2 text-xs text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/70 focus:outline-none sm:w-56"
             />
           </div>
@@ -79,7 +82,11 @@ export function CreationsGallery({
                     : 'text-slate-400 hover:text-slate-200'
                 }`}
               >
-                {tab === 'all' ? 'All' : tab === 'image' ? 'Images' : 'Videos'}
+                {tab === 'all'
+                  ? strings.filterAll
+                  : tab === 'image'
+                  ? strings.filterImages
+                  : strings.filterVideos}
               </button>
             ))}
           </div>
@@ -93,17 +100,17 @@ export function CreationsGallery({
             <Sparkles className="h-5 w-5" />
           </div>
           <h2 className="font-display text-lg font-semibold text-white">
-            Your creations gallery is empty
+            {strings.creationsEmptyTitle}
           </h2>
           <p className="mt-1 max-w-sm text-sm text-slate-400">
-            Generate an image or video in the studio and it will appear here automatically.
+            {strings.creationsEmptySubtitle}
           </p>
           <button
             type="button"
             onClick={onStartCreating}
             className="mt-6 min-h-[42px] rounded-xl bg-cyan-400 px-5 py-2.5 text-xs font-bold text-slate-950 hover:bg-cyan-300 transition-colors"
           >
-            Create First Image
+            {strings.createFirstBtn}
           </button>
         </div>
       ) : filtered.length === 0 ? (
@@ -111,7 +118,7 @@ export function CreationsGallery({
           No creations match your current filter.
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3">
           {filtered.map((item) => (
             <article
               key={item.id}
@@ -126,8 +133,10 @@ export function CreationsGallery({
                   <img
                     src={item.mediaUrl}
                     alt={item.prompt}
+                    loading="lazy"
+                    decoding="async"
                     referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+                    className="h-full w-full object-cover"
                   />
                 ) : (
                   <video
@@ -135,6 +144,7 @@ export function CreationsGallery({
                     muted
                     loop
                     playsInline
+                    preload="metadata"
                     onMouseEnter={(e) => {
                       e.currentTarget.play().catch(() => {});
                     }}

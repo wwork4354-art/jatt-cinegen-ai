@@ -145,7 +145,7 @@ export function buildPollinationsFastKeyframeUrl(
   const resolvedPrompt = suffix ? `${prompt}, ${suffix}` : prompt;
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
     resolvedPrompt
-  )}?width=${fetchWidth}&height=${fetchHeight}&model=flux&nologo=true&seed=${seed}`;
+  )}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&seed=${seed}`;
   return { url, fetchWidth, fetchHeight, resolvedPrompt };
 }
 

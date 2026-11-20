@@ -8,6 +8,7 @@ import {
   Share2,
   X,
 } from 'lucide-react';
+import type { UIStrings } from '../lib/i18n';
 import {
   CAMERA_MOTIONS,
   STYLE_PRESETS,
@@ -33,6 +34,7 @@ interface PreviewStageProps {
   onDownload: (item: CreationItem) => void;
   onShare: (item: CreationItem) => void;
   onAnimateImage: (item: CreationItem) => void;
+  strings: UIStrings;
 }
 
 export function PreviewStage({
@@ -51,6 +53,7 @@ export function PreviewStage({
   onDownload,
   onShare,
   onAnimateImage,
+  strings,
 }: PreviewStageProps) {
   const [isLightboxOpen, setIsLightboxOpen] = useState(false);
 
@@ -69,7 +72,7 @@ export function PreviewStage({
   return (
     <section
       aria-label="Generation preview viewport"
-      className="flex flex-1 flex-col justify-between rounded-2xl border border-white/[0.08] bg-[#0D1118] p-5 sm:p-6"
+      className="flex flex-1 flex-col justify-between rounded-2xl border border-white/[0.08] bg-[#0D1118] p-4 sm:p-6"
     >
       {/* Hidden preloading image element for direct Pollinations URL onLoad detection */}
       {pendingImageUrl && (
@@ -102,7 +105,7 @@ export function PreviewStage({
       )}
 
       {/* Main Darkroom Stage */}
-      <div className="relative flex flex-1 flex-col items-center justify-center rounded-xl border border-white/[0.06] bg-[#07090E] p-4 sm:p-6 min-h-[440px] lg:min-h-[560px]">
+      <div className="relative flex flex-1 flex-col items-center justify-center rounded-xl border border-white/[0.06] bg-[#07090E] p-4 sm:p-6 min-h-[420px] lg:min-h-[560px]">
         {progress.active ? (
           isLivePreviewActive ? (
             <div className="flex w-full flex-col items-center gap-4">
@@ -229,11 +232,11 @@ export function PreviewStage({
             <div className="space-y-1">
               <h2 className="font-display text-lg font-semibold text-slate-200">
                 {mode === 'text-to-image'
-                  ? 'Ready for Full HD Image Synthesis'
-                  : 'Ready for Motion Synthesis'}
+                  ? strings.readyImageTitle
+                  : strings.readyVideoTitle}
               </h2>
               <p className="text-xs leading-relaxed text-slate-500">
-                Enter a prompt on the left and click Generate. Outputs save automatically to My Creations for Full HD watermark-free download.
+                {strings.readySubtitle}
               </p>
             </div>
           </div>
@@ -247,7 +250,7 @@ export function PreviewStage({
             <div className="flex flex-wrap items-center gap-2 text-xs font-mono tabular-nums text-slate-400">
               <span className="inline-flex items-center gap-1 text-emerald-400 font-sans font-medium">
                 <Check className="h-3.5 w-3.5" />
-                Saved to My Creations
+                Saved to {strings.navMyCreations}
               </span>
               <span aria-hidden="true">·</span>
               <span>
@@ -283,7 +286,7 @@ export function PreviewStage({
                 className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-3.5 py-2 text-xs font-semibold text-slate-200 whitespace-nowrap hover:border-cyan-400/50 hover:text-cyan-200 transition-colors"
               >
                 <Film className="h-3.5 w-3.5" />
-                Animate Image
+                {strings.animateImageBtn}
               </button>
             )}
 
@@ -293,7 +296,7 @@ export function PreviewStage({
               className="inline-flex min-h-[40px] items-center gap-2 rounded-xl border border-white/15 bg-white/[0.04] px-3.5 py-2 text-xs font-semibold text-slate-200 whitespace-nowrap hover:border-cyan-400/50 hover:text-cyan-200 transition-colors"
             >
               <Share2 className="h-3.5 w-3.5" />
-              Share
+              {strings.shareBtn}
             </button>
 
             <button
@@ -303,8 +306,8 @@ export function PreviewStage({
             >
               <Download className="h-3.5 w-3.5" />
               {activeCreation.kind === 'video'
-                ? 'Download Full HD Video'
-                : 'Download Full HD'}
+                ? strings.downloadVideoBtn
+                : strings.downloadImageBtn}
             </button>
           </div>
         </div>

@@ -8,6 +8,7 @@ import { CreationsGallery } from './components/CreationsGallery';
 import { ShareModal } from './components/ShareModal';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
+import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import {
   buildPollinationsImageUrl,
   type AspectRatio,
@@ -22,6 +23,7 @@ import {
 } from './types/studio';
 
 const CUSTOM_BACKEND_STORAGE_KEY = 'vesper_custom_video_backend_url';
+const LANGUAGE_STORAGE_KEY = 'jatt_cinegen_language';
 
 interface PendingImageJob {
   url: string;
@@ -42,7 +44,16 @@ async function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<StudioTab>('text-to-image');
+  const [activeTab, setActiveTab] = useState<StudioTab>('text-to-video');
+  const [language, setLanguage] = useState<LanguageCode>(() => {
+    try {
+      const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY) as LanguageCode | null;
+      return saved || 'en';
+    } catch {
+      return 'en';
+    }
+  });
+
   const [prompt, setPrompt] = useState('');
   const [previousPrompt, setPreviousPrompt] = useState<string | null>(null);
   const [isEnhancing, setIsEnhancing] = useState(false);
@@ -52,6 +63,8 @@ export default function App() {
   const [duration, setDuration] = useState<VideoDuration>('15s');
   const [cameraMotion, setCameraMotion] = useState<CameraMotionId>('dolly-push');
   const [quality, setQuality] = useState<VideoQuality>('720p');
+  const [voiceoverEnabled, setVoiceoverEnabled] = useState(false);
+  const [backgroundMusicFile, setBackgroundMusicFile] = useState<File | null>(null);
   const [videoSourceMode, setVideoSourceMode] = useState<VideoSourceMode>('demo');
   const [customBackendUrl, setCustomBackendUrl] = useState<string>(() => {
     try {
@@ -80,6 +93,9 @@ export default function App() {
   const stageTimersRef = useRef<number[]>([]);
   const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
+  const strings = useMemo(() => getUIStrings(language), [language]);
+  const langMeta = useMemo(() => getLanguageMeta(language), [language]);
+
   // Load persisted creations on mount
   useEffect(() => {
     let mounted = true;
@@ -95,7 +111,15 @@ export default function App() {
     };
   }, []);
 
-  // Persist custom backend URL
+  // Persist language & custom backend URL
+  useEffect(() => {
+    try {
+      localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
+    } catch {
+      // Ignore storage errors
+    }
+  }, [language]);
+
   useEffect(() => {
     try {
       localStorage.setItem(CUSTOM_BACKEND_STORAGE_KEY, customBackendUrl);
@@ -103,13 +127,6 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [customBackendUrl]);
-
-  // Keep video aspect ratio valid when switching into video tabs
-  useEffect(() => {
-    if ((activeTab === 'text-to-video' || activeTab === 'image-to-video') && aspectRatio === '1:1') {
-      setAspectRatio('16:9');
-    }
-  }, [activeTab, aspectRatio]);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -181,7 +198,7 @@ export default function App() {
       aspectRatio: job.aspectRatio,
       width: job.width,
       height: job.height,
-      engineLabel: 'Pollinations Free HD',
+      engineLabel: 'Pollinations Free AI',
       mediaUrl: job.url,
       mimeType: 'image/jpeg',
       createdAt: Date.now(),
@@ -200,7 +217,7 @@ export default function App() {
     setPendingImageJob(null);
     stopTimer();
     setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-    setErrorMessage('Could not load image from Pollinations.ai. Please try generating again.');
+    setErrorMessage('Could not load image from Pollinations AI. Please try generating again.');
   }, [pendingImageJob, stopTimer]);
 
   const handleEnhancePrompt = async () => {
@@ -209,7 +226,7 @@ export default function App() {
 
     setIsEnhancing(true);
     setErrorMessage(null);
-    const mode = activeTab === 'creations' ? 'text-to-image' : activeTab;
+    const mode = activeTab === 'creations' ? 'text-to-video' : activeTab;
 
     try {
       const res = await fetch('/api/enhance-prompt', {
@@ -246,7 +263,7 @@ export default function App() {
 
     setErrorMessage(null);
 
-    // Direct frontend Pollinations.ai <img> generation (no /api/generate/image JSON call)
+    // Direct frontend Pollinations AI <img> generation
     if (activeTab === 'text-to-image') {
       const { url, width, height } = buildPollinationsImageUrl(
         trimmedPrompt,
@@ -255,7 +272,7 @@ export default function App() {
         Date.now()
       );
 
-      startTimer('Rendering Full HD image via Pollinations.ai...');
+      startTimer('Rendering Full HD image via Pollinations AI...');
       stageTimersRef.current.push(
         window.setTimeout(() => {
           setProgress((p) =>
@@ -284,7 +301,7 @@ export default function App() {
     if (videoSourceMode === 'demo') {
       startTimer(
         activeTab === 'text-to-video'
-          ? 'Fetching fast 720p HD scene image...'
+          ? 'Generating AI Scenes via Pollinations AI...'
           : 'Preparing uploaded image...'
       );
       try {
@@ -296,6 +313,9 @@ export default function App() {
           quality,
           style: stylePreset,
           sourceImageDataUrl: activeTab === 'image-to-video' ? uploadedImageUrl ?? undefined : undefined,
+          backgroundMusicFile,
+          voiceoverEnabled,
+          speechLocale: langMeta.speechLocale,
           onFrameCanvas: (sourceCanvas) => {
             setIsLivePreviewActive((prev) => (prev ? prev : true));
             const target = liveCanvasRef.current;
@@ -332,8 +352,9 @@ export default function App() {
           quality,
           engineLabel:
             activeTab === 'text-to-video'
-              ? `CineGen ${quality} Motion`
+              ? `Pollinations AI ${quality}`
               : `CineGen ${quality} Animate`,
+          scenes: result.scenes,
           mediaUrl: result.mediaUrl,
           mimeType: result.mimeType,
           createdAt: Date.now(),
@@ -407,7 +428,7 @@ export default function App() {
       setProgress((p) => ({
         ...p,
         percent: 94,
-        statusMessage: 'Preparing Full HD video playback...',
+        statusMessage: 'Preparing video playback...',
       }));
 
       let blob: Blob | undefined;
@@ -422,6 +443,10 @@ export default function App() {
           ? quality === '1080p'
             ? { width: 1080, height: 1920 }
             : { width: 720, height: 1280 }
+          : aspectRatio === '1:1'
+          ? quality === '1080p'
+            ? { width: 1080, height: 1080 }
+            : { width: 720, height: 720 }
           : quality === '1080p'
           ? { width: 1920, height: 1080 }
           : { width: 1280, height: 720 };
@@ -486,7 +511,7 @@ export default function App() {
       window.setTimeout(() => URL.revokeObjectURL(objectUrl), 2500);
     } catch (err) {
       setErrorMessage(
-        err instanceof Error ? err.message : 'Could not download Full HD asset.'
+        err instanceof Error ? err.message : 'Could not download asset.'
       );
     }
   }, []);
@@ -528,11 +553,7 @@ export default function App() {
       }
       setUploadedImageUrl(sourceUrl);
       setActiveTab('image-to-video');
-      if (item.aspectRatio === '1:1') {
-        setAspectRatio('16:9');
-      } else {
-        setAspectRatio(item.aspectRatio);
-      }
+      setAspectRatio(item.aspectRatio);
       if (!prompt.trim()) {
         setPrompt('Subtle cinematic camera push-in with gentle atmospheric lighting drift');
       }
@@ -545,11 +566,15 @@ export default function App() {
     setPreviousPrompt(null);
     setPendingImageJob(null);
     stopTimer();
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    setIsLivePreviewActive(false);
     setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
     setActiveCreationId(null);
     setErrorMessage(null);
     if (activeTab === 'creations') {
-      setActiveTab('text-to-image');
+      setActiveTab('text-to-video');
     }
     if (activeTab === 'image-to-video') {
       setUploadedImageUrl(null);
@@ -557,7 +582,10 @@ export default function App() {
   }, [activeTab, stopTimer]);
 
   return (
-    <div className="min-h-screen bg-[#07090E] text-slate-100 flex flex-col">
+    <div
+      dir={langMeta.rtl ? 'rtl' : 'ltr'}
+      className="min-h-screen bg-[#07090E] text-slate-100 flex flex-col"
+    >
       <TopNav
         activeTab={activeTab}
         onSelectTab={(tab) => {
@@ -566,9 +594,10 @@ export default function App() {
         }}
         creationsCount={creations.length}
         onResetWorkspace={handleResetWorkspace}
+        strings={strings}
       />
 
-      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 sm:px-6 lg:px-8 lg:py-8">
+      <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
         {activeTab === 'creations' ? (
           <motion.div
             key="creations"
@@ -582,7 +611,8 @@ export default function App() {
               onDownload={handleDownload}
               onShare={(item) => setShareItem(item)}
               onDelete={handleDeleteCreation}
-              onStartCreating={() => setActiveTab('text-to-image')}
+              onStartCreating={() => setActiveTab('text-to-video')}
+              strings={strings}
             />
           </motion.div>
         ) : (
@@ -598,6 +628,9 @@ export default function App() {
               <div className="w-full lg:w-[460px] xl:w-[490px] shrink-0">
                 <PromptPanel
                   mode={activeTab}
+                  language={language}
+                  onLanguageChange={setLanguage}
+                  strings={strings}
                   prompt={prompt}
                   onPromptChange={setPrompt}
                   previousPrompt={previousPrompt}
@@ -619,6 +652,10 @@ export default function App() {
                   onCameraMotionChange={setCameraMotion}
                   quality={quality}
                   onQualityChange={setQuality}
+                  voiceoverEnabled={voiceoverEnabled}
+                  onVoiceoverChange={setVoiceoverEnabled}
+                  backgroundMusicFile={backgroundMusicFile}
+                  onBackgroundMusicChange={setBackgroundMusicFile}
                   videoSourceMode={videoSourceMode}
                   onVideoSourceModeChange={setVideoSourceMode}
                   customBackendUrl={customBackendUrl}
@@ -647,10 +684,11 @@ export default function App() {
                 onDownload={handleDownload}
                 onShare={(item) => setShareItem(item)}
                 onAnimateImage={handleAnimateImage}
+                strings={strings}
               />
             </div>
 
-            {/* Compact Recent Creations Strip */}
+            {/* Compact Recent Creations Strip (capped at 6 for 3GB RAM efficiency) */}
             {creations.length > 0 && (
               <section
                 aria-label="Recent creations"
@@ -658,7 +696,7 @@ export default function App() {
               >
                 <div className="flex items-center justify-between">
                   <h2 className="font-display text-base font-semibold text-white">
-                    Recent Creations
+                    {strings.navMyCreations}
                   </h2>
                   <button
                     type="button"
@@ -688,14 +726,17 @@ export default function App() {
                             <img
                               src={item.mediaUrl}
                               alt={item.prompt}
+                              loading="lazy"
+                              decoding="async"
                               referrerPolicy="no-referrer"
-                              className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                              className="h-full w-full object-cover"
                             />
                           ) : (
                             <video
                               src={item.mediaUrl}
                               muted
                               playsInline
+                              preload="metadata"
                               className="h-full w-full object-cover"
                             />
                           )}
@@ -730,7 +771,7 @@ export default function App() {
             Jatt CineGen AI
           </div>
           <div className="flex items-center gap-3">
-            <span>Developed by Jatt Official</span>
+            <span>{strings.footerCredit}</span>
             <span className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 font-medium text-cyan-200">
               <BadgeCheck className="h-3.5 w-3.5 text-cyan-400" />
               Creator · Jatt Official

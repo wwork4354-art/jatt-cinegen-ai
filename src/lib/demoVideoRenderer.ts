@@ -15,6 +15,9 @@ interface RenderDemoVideoParams {
   quality: VideoQuality;
   style: StylePresetId;
   sourceImageDataUrl?: string;
+  backgroundMusicFile?: File | null;
+  voiceoverEnabled?: boolean;
+  speechLocale?: string;
   onFrameCanvas?: (sourceCanvas: HTMLCanvasElement) => void;
   onProgress: (
     percent: number,
@@ -29,6 +32,7 @@ export interface RenderedVideoResult {
   mimeType: string;
   width: number;
   height: number;
+  scenes?: string[];
 }
 
 function getDimensions(aspectRatio: AspectRatio, quality: VideoQuality): { width: number; height: number } {
@@ -41,35 +45,34 @@ function getDimensions(aspectRatio: AspectRatio, quality: VideoQuality): { width
   return quality === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
 }
 
-function loadImageFromUrl(src: string, timeoutMs = 10000): Promise<HTMLImageElement> {
+function loadImageElement(src: string, timeoutMs = 15000, minDimension = 200): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.referrerPolicy = 'no-referrer';
     const timer = window.setTimeout(() => {
-      reject(new Error('Image load timed out'));
+      reject(new Error('Image request timed out'));
     }, timeoutMs);
     img.onload = () => {
       window.clearTimeout(timer);
+      if (img.naturalWidth < minDimension || img.naturalHeight < minDimension) {
+        reject(new Error('Received invalid image dimensions'));
+        return;
+      }
       resolve(img);
     };
     img.onerror = () => {
       window.clearTimeout(timer);
-      reject(new Error('Failed to load base frame image'));
+      reject(new Error('Pollinations image request failed'));
     };
     img.src = src;
   });
 }
 
-function isLikelyBannerOrLowDetail(
-  img: HTMLImageElement,
-  targetWidth: number,
-  targetHeight: number
-): boolean {
-  if (img.naturalWidth < 360 || img.naturalHeight < 360) return true;
+function isLikelyRateLimitBanner(img: HTMLImageElement, targetWidth: number, targetHeight: number): boolean {
   const targetRatio = targetWidth / targetHeight;
-  const actualRatio = img.naturalWidth / img.naturalHeight;
-  if (Math.abs(targetRatio - actualRatio) > 0.32) {
+  const actualRatio = img.naturalWidth / Math.max(1, img.naturalHeight);
+  if (Math.abs(targetRatio - actualRatio) > 0.35) {
     return true;
   }
 
@@ -94,156 +97,93 @@ function isLikelyBannerOrLowDetail(
         uniformPixels += 1;
       }
     }
-    if (uniformPixels / totalPixels > 0.72) {
-      return true;
-    }
+    return uniformPixels / totalPixels > 0.72;
   } catch {
-    // Ignore probe errors
+    return false;
   }
-
-  return false;
 }
 
-async function fetchFastPollinationsKeyframe(
-  prompt: string,
+async function fetchPollinationsImageWithRetries(
+  scenePrompt: string,
   aspectRatio: AspectRatio,
   style: StylePresetId,
-  seed: number
-): Promise<HTMLImageElement | null> {
-  const { url, fetchWidth, fetchHeight } = buildPollinationsFastKeyframeUrl(
-    prompt,
-    aspectRatio,
-    style,
-    seed
-  );
+  seed: number,
+  onAttemptStatus: (msg: string) => void
+): Promise<HTMLImageElement> {
+  const maxAttempts = 4;
 
-  const controller = new AbortController();
-  const timeoutId = window.setTimeout(() => controller.abort(), 9000);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const { url, fetchWidth, fetchHeight } = buildPollinationsFastKeyframeUrl(
+      scenePrompt,
+      aspectRatio,
+      style,
+      seed + attempt * 31
+    );
 
-  try {
-    const res = await fetch(url, {
-      method: 'GET',
-      signal: controller.signal,
-      cache: 'no-store',
-    });
-    window.clearTimeout(timeoutId);
-
-    const retryAfterHeader = res.headers.get('retry-after');
-    const paymentRequired = res.headers.get('payment-required');
-    if (!res.ok || res.status === 402 || res.status === 429 || paymentRequired || retryAfterHeader) {
-      return null;
-    }
-
-    const contentType = res.headers.get('content-type') || '';
-    if (!contentType.startsWith('image/')) {
-      return null;
-    }
-
-    const blob = await res.blob();
-    if (blob.size < 25000) {
-      return null;
-    }
-
-    const objectUrl = URL.createObjectURL(blob);
     try {
-      const img = await loadImageFromUrl(objectUrl, 8000);
-      if (isLikelyBannerOrLowDetail(img, fetchWidth, fetchHeight)) {
-        URL.revokeObjectURL(objectUrl);
-        return null;
+      const img = await loadImageElement(url, 15000);
+      if (isLikelyRateLimitBanner(img, fetchWidth, fetchHeight)) {
+        throw new Error('Pollinations returned a temporary rate-limit banner');
       }
       return img;
-    } catch {
-      URL.revokeObjectURL(objectUrl);
-      return null;
+    } catch (err) {
+      if (attempt < maxAttempts) {
+        onAttemptStatus(
+          `Generating AI Scene... (Retry ${attempt}/${maxAttempts - 1} in 4s)`
+        );
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+      } else {
+        throw err instanceof Error
+          ? err
+          : new Error('Unable to load AI scene image from Pollinations.');
+      }
+    }
+  }
+
+  throw new Error('Unable to load AI scene image from Pollinations.');
+}
+
+function buildSequentialScenes(prompt: string): [string, string, string] {
+  return [
+    `Wide establishing cinematic opening shot: ${prompt}, dramatic atmospheric lighting, deep perspective`,
+    `Dynamic action mid-shot in full motion: ${prompt}, intense dramatic lighting, vivid detail`,
+    `Sweeping cinematic finale shot: ${prompt}, golden hour rim light, epic closing composition`,
+  ];
+}
+
+async function expandPromptToScenes(
+  prompt: string,
+  style: StylePresetId,
+  cameraMotion: CameraMotionId
+): Promise<[string, string, string]> {
+  try {
+    const res = await fetch('/api/expand-scenes', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, style, cameraMotion }),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = (await res.json()) as { scenes?: string[] };
+      if (Array.isArray(data.scenes) && data.scenes.length >= 3) {
+        return [data.scenes[0], data.scenes[1], data.scenes[2]];
+      }
     }
   } catch {
-    window.clearTimeout(timeoutId);
-    return null;
+    // Fallback cleanly when Gemini key isn't configured
   }
+  return buildSequentialScenes(prompt);
 }
 
-function getStylePalette(style: StylePresetId, prompt: string): [string, string, string] {
-  const lower = prompt.toLowerCase();
-  if (lower.includes('savanna') || lower.includes('lion') || lower.includes('desert') || lower.includes('sunset')) {
-    return ['#160B06', '#7C2D12', '#F59E0B'];
-  }
-  if (lower.includes('forest') || lower.includes('jungle') || lower.includes('emerald')) {
-    return ['#04130D', '#065F46', '#34D399'];
-  }
-  switch (style) {
-    case 'anime':
-      return ['#0F172A', '#312E81', '#F59E0B'];
-    case '3d-render':
-      return ['#090D16', '#0E7490', '#22D3EE'];
-    case 'cinematic':
-      return ['#070A10', '#164E63', '#EA580C'];
-    default:
-      return ['#0A0F1A', '#1E293B', '#38BDF8'];
-  }
-}
-
-function synthesizeFallbackSceneCanvas(
-  width: number,
-  height: number,
-  style: StylePresetId,
-  prompt: string
-): HTMLCanvasElement {
-  const offscreen = document.createElement('canvas');
-  offscreen.width = width;
-  offscreen.height = height;
-  const octx = offscreen.getContext('2d');
-  if (!octx) return offscreen;
-
-  const [c1, c2, c3] = getStylePalette(style, prompt);
-
-  const bg = octx.createLinearGradient(0, 0, width, height);
-  bg.addColorStop(0, c1);
-  bg.addColorStop(0.54, c2);
-  bg.addColorStop(1, c3);
-  octx.fillStyle = bg;
-  octx.fillRect(0, 0, width, height);
-
-  const sunX = width * 0.62;
-  const sunY = height * 0.38;
-  const glow = octx.createRadialGradient(sunX, sunY, 20, sunX, sunY, width * 0.56);
-  glow.addColorStop(0, 'rgba(254, 240, 138, 0.45)');
-  glow.addColorStop(0.42, 'rgba(34, 211, 238, 0.18)');
-  glow.addColorStop(1, 'rgba(7, 9, 14, 0)');
-  octx.fillStyle = glow;
-  octx.fillRect(0, 0, width, height);
-
-  for (let layer = 0; layer < 3; layer += 1) {
-    octx.beginPath();
-    const baseY = height * (0.58 + layer * 0.11);
-    octx.moveTo(0, height);
-    octx.lineTo(0, baseY);
-    for (let x = 0; x <= width; x += width / 18) {
-      const wave =
-        Math.sin((x / width) * Math.PI * (2.4 + layer) + layer * 1.1) *
-        (height * (0.055 - layer * 0.01));
-      octx.lineTo(x, baseY + wave);
-    }
-    octx.lineTo(width, height);
-    octx.closePath();
-    octx.fillStyle =
-      layer === 0
-        ? 'rgba(15, 23, 42, 0.52)'
-        : layer === 1
-        ? 'rgba(9, 13, 24, 0.78)'
-        : 'rgba(5, 7, 13, 0.94)';
-    octx.fill();
-  }
-
-  return offscreen;
-}
-
-function chooseSupportedMimeType(): string {
-  const candidates = [
-    'video/webm;codecs=vp9',
-    'video/webm;codecs=vp8',
-    'video/webm',
-    'video/mp4',
-  ];
+function chooseSupportedMimeType(hasAudio: boolean): string {
+  const candidates = hasAudio
+    ? [
+        'video/webm;codecs=vp9,opus',
+        'video/webm;codecs=vp8,opus',
+        'video/webm',
+        'video/mp4',
+      ]
+    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
   for (const mime of candidates) {
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
       return mime;
@@ -252,66 +192,63 @@ function chooseSupportedMimeType(): string {
   return 'video/webm';
 }
 
-function drawDynamicSceneFrame(
+function drawKenBurnsImage(
   ctx: CanvasRenderingContext2D,
-  source: HTMLImageElement | HTMLCanvasElement,
+  img: HTMLImageElement,
   width: number,
   height: number,
-  t: number,
-  motion: CameraMotionId
+  localT: number,
+  motion: CameraMotionId,
+  alpha = 1,
+  cropBiasX = 0,
+  baseZoomBoost = 1
 ) {
-  const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  const ease = localT < 0.5 ? 2 * localT * localT : 1 - Math.pow(-2 * localT + 2, 2) / 2;
 
-  // Base Ken Burns motion + organic micro camera shake
-  let scale = 1.07;
-  let offsetX = 0;
+  let scale = 1.07 * baseZoomBoost;
+  let offsetX = cropBiasX * width;
   let offsetY = 0;
   let rotation = 0;
 
   switch (motion) {
     case 'dolly-push':
-      scale = 1.03 + ease * 0.17;
-      offsetX = Math.sin(t * Math.PI) * width * 0.018;
+      scale = (1.03 + ease * 0.16) * baseZoomBoost;
+      offsetX += Math.sin(localT * Math.PI) * width * 0.016;
       break;
     case 'slow-pan':
-      scale = 1.16;
-      offsetX = (0.5 - ease) * width * 0.12;
+      scale = 1.16 * baseZoomBoost;
+      offsetX += (0.5 - ease) * width * 0.11;
       break;
     case 'aerial-orbit':
-      scale = 1.16;
-      offsetX = Math.sin(t * Math.PI * 2) * width * 0.045;
-      offsetY = Math.cos(t * Math.PI * 2) * height * 0.03;
-      rotation = Math.sin(t * Math.PI * 2) * 0.015;
+      scale = 1.16 * baseZoomBoost;
+      offsetX += Math.sin(localT * Math.PI * 2) * width * 0.042;
+      offsetY += Math.cos(localT * Math.PI * 2) * height * 0.028;
+      rotation = Math.sin(localT * Math.PI * 2) * 0.014;
       break;
     case 'crane-up':
-      scale = 1.16;
-      offsetY = (0.5 - ease) * height * 0.11;
+      scale = 1.16 * baseZoomBoost;
+      offsetY += (0.5 - ease) * height * 0.1;
       break;
     case 'handheld-drift':
-      scale = 1.12;
-      offsetX = Math.sin(t * 10.5) * width * 0.014 + Math.cos(t * 4.7) * width * 0.009;
-      offsetY = Math.cos(t * 8.4) * height * 0.012;
-      rotation = Math.sin(t * 7.2) * 0.008;
+      scale = 1.12 * baseZoomBoost;
+      offsetX += Math.sin(localT * 10.5) * width * 0.013 + Math.cos(localT * 4.7) * width * 0.008;
+      offsetY += Math.cos(localT * 8.4) * height * 0.011;
+      rotation = Math.sin(localT * 7.2) * 0.008;
       break;
     case 'static':
     default:
-      scale = 1.04 + Math.sin(t * Math.PI) * 0.03;
+      scale = (1.03 + Math.sin(localT * Math.PI) * 0.025) * baseZoomBoost;
       break;
   }
 
-  // Subtle organic cinema camera shake layered onto all active motion modes
+  // Subtle organic camera shake
   if (motion !== 'static') {
-    offsetX += Math.sin(t * 24) * width * 0.0022 + Math.cos(t * 14) * width * 0.0015;
-    offsetY += Math.cos(t * 21) * height * 0.0022;
-    rotation += Math.sin(t * 18) * 0.0014;
+    offsetX += Math.sin(localT * 24) * width * 0.002 + Math.cos(localT * 14) * width * 0.0014;
+    offsetY += Math.cos(localT * 21) * height * 0.002;
+    rotation += Math.sin(localT * 18) * 0.0012;
   }
 
-  const srcWidth =
-    source instanceof HTMLImageElement ? source.naturalWidth : source.width;
-  const srcHeight =
-    source instanceof HTMLImageElement ? source.naturalHeight : source.height;
-
-  const imgAspect = srcWidth / Math.max(1, srcHeight);
+  const imgAspect = img.naturalWidth / Math.max(1, img.naturalHeight);
   const canvasAspect = width / height;
   let drawW = width;
   let drawH = height;
@@ -324,10 +261,11 @@ function drawDynamicSceneFrame(
   }
 
   ctx.save();
+  ctx.globalAlpha = alpha;
   ctx.translate(width / 2 + offsetX, height / 2 + offsetY);
   ctx.rotate(rotation);
   ctx.scale(scale, scale);
-  ctx.drawImage(source, -drawW / 2, -drawH / 2, drawW, drawH);
+  ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
   ctx.restore();
 }
 
@@ -339,37 +277,72 @@ export async function renderDemoVideo({
   quality,
   style,
   sourceImageDataUrl,
+  backgroundMusicFile,
+  voiceoverEnabled,
+  speechLocale = 'en-US',
   onFrameCanvas,
   onProgress,
 }: RenderDemoVideoParams): Promise<RenderedVideoResult> {
   const { width, height } = getDimensions(aspectRatio, quality);
   const totalSeconds = duration === '15s' ? 15 : duration === '10s' ? 10 : 5;
+  const isMultiScene15s = duration === '15s' && !sourceImageDataUrl;
 
-  let mainScene: HTMLImageElement | HTMLCanvasElement;
+  const sceneImages: HTMLImageElement[] = [];
+  let sceneDescriptions: string[] | undefined;
 
   if (sourceImageDataUrl) {
     onProgress(8, 'Preparing uploaded image...', totalSeconds);
-    try {
-      mainScene = await loadImageFromUrl(sourceImageDataUrl, 12000);
-    } catch {
-      mainScene = synthesizeFallbackSceneCanvas(width, height, style, prompt);
+    const uploaded = await loadImageElement(sourceImageDataUrl, 15000, 16);
+    sceneImages.push(uploaded);
+  } else if (isMultiScene15s) {
+    onProgress(6, 'Generating AI Scenes (expanding storyboard)...', totalSeconds);
+    const expanded = await expandPromptToScenes(prompt, style, cameraMotion);
+    sceneDescriptions = expanded;
+    const baseSeed = Date.now();
+
+    // Fetch Scene 1 (must succeed via Pollinations with up to 3 retries)
+    onProgress(12, 'Generating AI Scene 1 of 3...', totalSeconds);
+    const scene1 = await fetchPollinationsImageWithRetries(
+      expanded[0],
+      aspectRatio,
+      style,
+      baseSeed,
+      (msg) => onProgress(12, msg, totalSeconds)
+    );
+    sceneImages.push(scene1);
+
+    // Attempt Scene 2 & Scene 3 cleanly; if Pollinations rate-limits mid-sequence, reuse Scene 1 with distinct framing
+    for (let idx = 1; idx < 3; idx += 1) {
+      const pct = 18 + idx * 8;
+      onProgress(pct, `Generating AI Scene ${idx + 1} of 3...`, totalSeconds);
+      try {
+        const nextScene = await fetchPollinationsImageWithRetries(
+          expanded[idx],
+          aspectRatio,
+          style,
+          baseSeed + idx * 149,
+          (msg) => onProgress(pct, msg, totalSeconds)
+        );
+        sceneImages.push(nextScene);
+      } catch {
+        // Keep using real AI Scene 1 image rather than ever rendering fake hills
+        sceneImages.push(scene1);
+      }
     }
   } else {
-    onProgress(8, 'Fetching fast 720p HD scene image...', totalSeconds);
-    const fetched = await fetchFastPollinationsKeyframe(
+    onProgress(10, 'Generating AI Scene...', totalSeconds);
+    const mainScene = await fetchPollinationsImageWithRetries(
       prompt,
       aspectRatio,
       style,
-      Date.now()
+      Date.now(),
+      (msg) => onProgress(12, msg, totalSeconds)
     );
-    mainScene = fetched ?? synthesizeFallbackSceneCanvas(width, height, style, prompt);
+    sceneImages.push(mainScene);
   }
 
-  onProgress(
-    15,
-    `Rendering: ${totalSeconds}s remaining...`,
-    totalSeconds
-  );
+  const startPercent = isMultiScene15s ? 35 : 22;
+  onProgress(startPercent, `Rendering: ${totalSeconds}s remaining...`, totalSeconds);
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -383,12 +356,60 @@ export async function renderDemoVideo({
     throw new Error('Your browser does not support MediaRecorder video encoding.');
   }
 
-  const fps = 30;
-  const stream = canvas.captureStream(fps);
-  const mimeType = chooseSupportedMimeType();
-  const bitrate = quality === '1080p' ? 8_000_000 : 4_200_000;
+  // Keep fps at 24 for ultra-smooth 3GB RAM mobile performance
+  const fps = 24;
+  const videoStream = canvas.captureStream(fps);
+  const combinedTracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
 
-  const recorder = new MediaRecorder(stream, {
+  let audioContext: AudioContext | null = null;
+  let audioSourceNode: AudioBufferSourceNode | null = null;
+
+  if (backgroundMusicFile) {
+    try {
+      const AudioCtx =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      audioContext = new AudioCtx();
+      const arrayBuf = await backgroundMusicFile.arrayBuffer();
+      const audioBuffer = await audioContext.decodeAudioData(arrayBuf);
+      const dest = audioContext.createMediaStreamDestination();
+      audioSourceNode = audioContext.createBufferSource();
+      audioSourceNode.buffer = audioBuffer;
+      audioSourceNode.loop = true;
+      const gainNode = audioContext.createGain();
+      gainNode.gain.value = 0.72;
+      audioSourceNode.connect(gainNode);
+      gainNode.connect(dest);
+      audioSourceNode.start(0);
+      combinedTracks.push(...dest.stream.getAudioTracks());
+    } catch {
+      // Proceed cleanly with video-only if audio decode fails
+      if (audioContext) {
+        audioContext.close().catch(() => {});
+        audioContext = null;
+      }
+    }
+  }
+
+  // Trigger optional AI Voiceover via Web Speech API
+  if (voiceoverEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(prompt);
+      utterance.lang = speechLocale;
+      utterance.rate = 0.96;
+      window.speechSynthesis.speak(utterance);
+    } catch {
+      // Ignore speech synthesis errors on restricted devices
+    }
+  }
+
+  const finalStream = new MediaStream(combinedTracks);
+  const hasAudio = combinedTracks.some((t) => t.kind === 'audio');
+  const mimeType = chooseSupportedMimeType(hasAudio);
+  const bitrate = quality === '1080p' ? 7_500_000 : 3_800_000;
+
+  const recorder = new MediaRecorder(finalStream, {
     mimeType,
     videoBitsPerSecond: bitrate,
   });
@@ -400,14 +421,21 @@ export async function renderDemoVideo({
     }
   };
 
-  const particles = Array.from({ length: 44 }, (_, idx) => ({
+  // Lightweight particle count (28) for smooth 3GB RAM playback
+  const particles = Array.from({ length: 28 }, (_, idx) => ({
     x: ((idx * 197) % 1000) / 1000,
     y: ((idx * 353) % 1000) / 1000,
-    radius: idx % 7 === 0 ? 4.2 + (idx % 3) * 2.0 : 1.3 + (idx % 4) * 0.85,
-    speedX: ((idx % 5) - 2) * (idx % 7 === 0 ? 0.01 : 0.0045),
-    speedY: -0.007 - (idx % 3) * 0.004,
-    alpha: idx % 7 === 0 ? 0.09 : 0.16 + (idx % 5) * 0.05,
+    radius: idx % 6 === 0 ? 3.8 : 1.4 + (idx % 3) * 0.7,
+    speedX: ((idx % 5) - 2) * 0.0045,
+    speedY: -0.007 - (idx % 3) * 0.0035,
+    alpha: idx % 6 === 0 ? 0.1 : 0.18,
   }));
+
+  const sceneMotions: [CameraMotionId, CameraMotionId, CameraMotionId] = [
+    cameraMotion === 'static' ? 'dolly-push' : cameraMotion,
+    cameraMotion === 'slow-pan' ? 'dolly-push' : 'slow-pan',
+    cameraMotion === 'aerial-orbit' ? 'crane-up' : 'aerial-orbit',
+  ];
 
   const recordingFinished = new Promise<Blob>((resolve, reject) => {
     recorder.onstop = () => {
@@ -421,79 +449,134 @@ export async function renderDemoVideo({
 
   const startTime = performance.now();
   const totalMs = totalSeconds * 1000;
+  const crossfadeSec = 0.6;
 
-  await new Promise<void>((resolve) => {
-    const drawFrame = () => {
-      const elapsed = performance.now() - startTime;
-      const t = Math.min(1, elapsed / totalMs);
+  try {
+    await new Promise<void>((resolve) => {
+      const drawFrame = () => {
+        const elapsed = performance.now() - startTime;
+        const t = Math.min(1, elapsed / totalMs);
+        const currentSec = t * totalSeconds;
 
-      ctx.fillStyle = '#07090E';
-      ctx.fillRect(0, 0, width, height);
+        ctx.fillStyle = '#07090E';
+        ctx.fillRect(0, 0, width, height);
 
-      drawDynamicSceneFrame(ctx, mainScene, width, height, t, cameraMotion);
+        if (isMultiScene15s && sceneImages.length >= 3) {
+          const segDur = 5;
+          const sceneIdx = Math.min(2, Math.floor(currentSec / segDur));
+          const sceneElapsed = currentSec - sceneIdx * segDur;
+          const localT = Math.min(1, sceneElapsed / segDur);
 
-      // Pulsing dynamic atmospheric lighting glow
-      const glowPulse = 0.06 + Math.sin(t * Math.PI * 2) * 0.03;
-      const sweepX = (t * 1.35 - 0.18) * width;
-      const beam = ctx.createLinearGradient(
-        sweepX - width * 0.25,
-        0,
-        sweepX + width * 0.25,
-        height
-      );
-      beam.addColorStop(0, 'rgba(255, 255, 255, 0)');
-      beam.addColorStop(0.5, `rgba(224, 242, 254, ${glowPulse.toFixed(3)})`);
-      beam.addColorStop(1, 'rgba(255, 255, 255, 0)');
-      ctx.fillStyle = beam;
-      ctx.fillRect(0, 0, width, height);
+          // If reusing Scene 1 fallback for act 2/3 due to rate limit, apply distinct zoom/pan bias
+          const reused = sceneIdx > 0 && sceneImages[sceneIdx] === sceneImages[0];
+          const biasX = reused ? (sceneIdx === 1 ? -0.035 : 0.035) : 0;
+          const zoomBoost = reused ? (sceneIdx === 1 ? 1.08 : 1.04) : 1;
 
-      // Parallax atmospheric dust & bokeh
-      for (const p of particles) {
-        const px = (((p.x + t * p.speedX * 12) % 1) + 1) % 1 * width;
-        const py = (((p.y + t * p.speedY * 12) % 1) + 1) % 1 * height;
-        ctx.beginPath();
-        ctx.arc(px, py, p.radius * (width / 1280), 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(224, 242, 254, ${p.alpha})`;
-        ctx.fill();
+          drawKenBurnsImage(
+            ctx,
+            sceneImages[sceneIdx],
+            width,
+            height,
+            localT,
+            sceneMotions[sceneIdx],
+            1,
+            biasX,
+            zoomBoost
+          );
+
+          if (sceneIdx < 2 && sceneElapsed > segDur - crossfadeSec) {
+            const fadeT = (sceneElapsed - (segDur - crossfadeSec)) / crossfadeSec;
+            const nextReused = sceneImages[sceneIdx + 1] === sceneImages[0];
+            drawKenBurnsImage(
+              ctx,
+              sceneImages[sceneIdx + 1],
+              width,
+              height,
+              0,
+              sceneMotions[sceneIdx + 1],
+              Math.min(1, Math.max(0, fadeT)),
+              nextReused ? (sceneIdx + 1 === 1 ? -0.035 : 0.035) : 0,
+              nextReused ? 1.08 : 1
+            );
+          }
+        } else {
+          drawKenBurnsImage(ctx, sceneImages[0], width, height, t, cameraMotion, 1);
+        }
+
+        // Dynamic neon lighting glow sweep
+        const glowPulse = 0.055 + Math.sin(t * Math.PI * 2) * 0.025;
+        const sweepX = (t * 1.35 - 0.18) * width;
+        const beam = ctx.createLinearGradient(
+          sweepX - width * 0.25,
+          0,
+          sweepX + width * 0.25,
+          height
+        );
+        beam.addColorStop(0, 'rgba(255, 255, 255, 0)');
+        beam.addColorStop(0.5, `rgba(34, 211, 238, ${glowPulse.toFixed(3)})`);
+        beam.addColorStop(1, 'rgba(255, 255, 255, 0)');
+        ctx.fillStyle = beam;
+        ctx.fillRect(0, 0, width, height);
+
+        // Neon atmospheric particles
+        for (const p of particles) {
+          const px = (((p.x + t * p.speedX * 12) % 1) + 1) % 1 * width;
+          const py = (((p.y + t * p.speedY * 12) % 1) + 1) % 1 * height;
+          ctx.beginPath();
+          ctx.arc(px, py, p.radius * (width / 1280), 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(165, 243, 252, ${p.alpha})`;
+          ctx.fill();
+        }
+
+        // Clean cinema vignette
+        const vignette = ctx.createRadialGradient(
+          width / 2,
+          height / 2,
+          width * 0.28,
+          width / 2,
+          height / 2,
+          width * 0.78
+        );
+        vignette.addColorStop(0, 'rgba(0,0,0,0)');
+        vignette.addColorStop(1, 'rgba(4,6,11,0.32)');
+        ctx.fillStyle = vignette;
+        ctx.fillRect(0, 0, width, height);
+
+        if (onFrameCanvas) {
+          onFrameCanvas(canvas);
+        }
+
+        const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+        const percentRange = 97 - startPercent;
+        const percent = Math.min(97, Math.round(startPercent + t * percentRange));
+
+        onProgress(
+          percent,
+          `Rendering ${totalSeconds}s Video · ${remainingSec}s remaining...`,
+          remainingSec
+        );
+
+        if (elapsed < totalMs) {
+          setTimeout(() => requestAnimationFrame(drawFrame), 1000 / fps);
+        } else {
+          resolve();
+        }
+      };
+
+      requestAnimationFrame(drawFrame);
+    });
+  } finally {
+    if (audioSourceNode) {
+      try {
+        audioSourceNode.stop();
+      } catch {
+        // Ignore stop error
       }
-
-      // Clean optical cinema vignette (zero watermark)
-      const vignette = ctx.createRadialGradient(
-        width / 2,
-        height / 2,
-        width * 0.28,
-        width / 2,
-        height / 2,
-        width * 0.78
-      );
-      vignette.addColorStop(0, 'rgba(0,0,0,0)');
-      vignette.addColorStop(1, 'rgba(4,6,11,0.34)');
-      ctx.fillStyle = vignette;
-      ctx.fillRect(0, 0, width, height);
-
-      // Push frame straight to the live real-time preview canvas
-      if (onFrameCanvas) {
-        onFrameCanvas(canvas);
-      }
-
-      const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
-      const percent = Math.min(97, Math.round(15 + t * 82));
-
-      onProgress(
-        percent,
-        `Rendering: ${remainingSec}s remaining...`,
-        remainingSec
-      );
-
-      if (elapsed < totalMs) {
-        setTimeout(() => requestAnimationFrame(drawFrame), 1000 / fps);
-      } else {
-        resolve();
-      }
-    };
-
-    requestAnimationFrame(drawFrame);
-  });
+    }
+    if (audioContext) {
+      audioContext.close().catch(() => {});
+    }
+  }
 
   onProgress(99, 'Finalizing downloadable video...', 0);
   recorder.stop();
@@ -507,5 +590,6 @@ export async function renderDemoVideo({
     mimeType: blob.type || 'video/webm',
     width,
     height,
+    scenes: sceneDescriptions,
   };
 }

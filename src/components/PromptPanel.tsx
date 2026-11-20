@@ -3,15 +3,19 @@ import {
   Camera,
   Check,
   Clock,
+  Globe,
   ImagePlus,
   Link2,
   Loader2,
+  Mic,
+  Music,
   RotateCcw,
   SlidersHorizontal,
   Trash2,
   Upload,
   Wand2,
 } from 'lucide-react';
+import { LANGUAGES, type LanguageCode, type UIStrings } from '../lib/i18n';
 import {
   CAMERA_MOTIONS,
   STYLE_PRESETS,
@@ -27,6 +31,9 @@ import {
 
 interface PromptPanelProps {
   mode: Exclude<StudioTab, 'creations'>;
+  language: LanguageCode;
+  onLanguageChange: (code: LanguageCode) => void;
+  strings: UIStrings;
   prompt: string;
   onPromptChange: (value: string) => void;
   previousPrompt: string | null;
@@ -43,6 +50,10 @@ interface PromptPanelProps {
   onCameraMotionChange: (motion: CameraMotionId) => void;
   quality: VideoQuality;
   onQualityChange: (quality: VideoQuality) => void;
+  voiceoverEnabled: boolean;
+  onVoiceoverChange: (enabled: boolean) => void;
+  backgroundMusicFile: File | null;
+  onBackgroundMusicChange: (file: File | null) => void;
   videoSourceMode: VideoSourceMode;
   onVideoSourceModeChange: (mode: VideoSourceMode) => void;
   customBackendUrl: string;
@@ -55,14 +66,9 @@ interface PromptPanelProps {
 }
 
 const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations'>, string[]> = {
-  'text-to-image': [
-    'Obsidian glass pavilion perched above misty basalt sea cliffs at blue hour',
-    'Bioluminescent deep-sea jellyfish drifting through dark indigo ocean abyss',
-    'Futuristic Kyoto tramway crossing a rain-drenched lantern bridge at dusk',
-  ],
   'text-to-video': [
+    'A majestic lion walking in a glowing cyberpunk jungle at sunset',
     'Slow aerial reveal over volcanic black sand beaches with rolling surf',
-    'Cybernetic greenhouse bathed in golden morning light with drifting mist',
     'High-speed magnetic train gliding across an alpine viaduct at twilight',
   ],
   'image-to-video': [
@@ -70,10 +76,18 @@ const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations'>, string[]> = {
     'Subtle cinematic dolly push-in with drifting atmospheric dust motes',
     'Camera slowly pans right as reflections shimmer across the foreground',
   ],
+  'text-to-image': [
+    'Obsidian glass pavilion perched above misty basalt sea cliffs at blue hour',
+    'Bioluminescent deep-sea jellyfish drifting through dark indigo ocean abyss',
+    'Futuristic Kyoto tramway crossing a rain-drenched lantern bridge at dusk',
+  ],
 };
 
 export function PromptPanel({
   mode,
+  language,
+  onLanguageChange,
+  strings,
   prompt,
   onPromptChange,
   previousPrompt,
@@ -90,6 +104,10 @@ export function PromptPanel({
   onCameraMotionChange,
   quality,
   onQualityChange,
+  voiceoverEnabled,
+  onVoiceoverChange,
+  backgroundMusicFile,
+  onBackgroundMusicChange,
   videoSourceMode,
   onVideoSourceModeChange,
   customBackendUrl,
@@ -101,6 +119,7 @@ export function PromptPanel({
   onGenerate,
 }: PromptPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioInputRef = useRef<HTMLInputElement>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
@@ -109,7 +128,7 @@ export function PromptPanel({
   }>({ checking: false });
 
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video';
-  const aspectOptions: AspectRatio[] = isVideoMode ? ['16:9', '9:16'] : ['16:9', '9:16', '1:1'];
+  const aspectOptions: AspectRatio[] = ['16:9', '9:16', '1:1'];
 
   const handleFileRead = (file: File) => {
     if (!file.type.startsWith('image/')) return;
@@ -161,29 +180,52 @@ export function PromptPanel({
 
   const heading =
     mode === 'text-to-image'
-      ? 'Text to Image'
+      ? strings.navTextToImage
       : mode === 'text-to-video'
-      ? 'Text to Video'
-      : 'Image to Video';
+      ? strings.navTextToVideo
+      : strings.navImageToVideo;
 
   const subtitle =
     mode === 'text-to-image'
-      ? 'Generate Full HD 1080p images using Pollinations free API with zero key setup.'
+      ? 'Generate Full HD images 100% free via Pollinations AI with zero key limits.'
       : mode === 'text-to-video'
-      ? 'Generate Full HD motion videos 100% free with zero API keys required.'
-      : 'Upload a reference frame and animate it with custom camera physics.';
+      ? 'Auto-generates sequential Pollinations AI scenes and renders a continuous 15s video in-browser.'
+      : 'Upload any photo and animate it with smooth camera motion and optional audio.';
 
   return (
     <section
       aria-label="Generation controls"
-      className="flex flex-col gap-6 rounded-2xl border border-white/[0.08] bg-[#0D1118] p-5 sm:p-6"
+      className="flex flex-col gap-5 rounded-2xl border border-white/[0.08] bg-[#0D1118] p-4 sm:p-6"
     >
-      {/* Header */}
-      <div className="space-y-1">
-        <h1 className="font-display text-2xl font-semibold tracking-tight text-white">
-          {heading}
-        </h1>
-        <p className="text-sm leading-relaxed text-slate-400">{subtitle}</p>
+      {/* Header + 13-Language Selector */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1 min-w-0 flex-1">
+          <h1 className="font-display text-2xl font-semibold tracking-tight text-white">
+            {heading}
+          </h1>
+          <p className="text-xs sm:text-sm leading-relaxed text-slate-400">{subtitle}</p>
+        </div>
+
+        <div className="shrink-0">
+          <label htmlFor="studio-language" className="sr-only">
+            {strings.languageLabel}
+          </label>
+          <div className="relative flex items-center">
+            <Globe className="pointer-events-none absolute left-2.5 h-3.5 w-3.5 text-cyan-400" />
+            <select
+              id="studio-language"
+              value={language}
+              onChange={(e) => onLanguageChange(e.target.value as LanguageCode)}
+              className="min-h-[36px] appearance-none rounded-lg border border-white/15 bg-[#07090E] pl-8 pr-6 py-1.5 text-xs font-medium text-slate-200 focus:border-cyan-400 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+            >
+              {LANGUAGES.map((lang) => (
+                <option key={lang.code} value={lang.code}>
+                  {lang.nativeName} ({lang.name})
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
       </div>
 
       {/* Image Uploader for Image to Video */}
@@ -200,7 +242,7 @@ export function PromptPanel({
                 className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-rose-300 transition-colors"
               >
                 <Trash2 className="h-3.5 w-3.5" />
-                Remove
+                {strings.musicRemove}
               </button>
             )}
           </div>
@@ -269,7 +311,7 @@ export function PromptPanel({
           {recentImages.length > 0 && !uploadedImageUrl && (
             <div className="space-y-2">
               <div className="text-xs font-medium text-slate-400">
-                Or pick from My Creations
+                Or pick from {strings.navMyCreations}
               </div>
               <div className="flex items-center gap-2 overflow-x-auto pb-1">
                 {recentImages.slice(0, 6).map((item) => (
@@ -283,6 +325,8 @@ export function PromptPanel({
                     <img
                       src={item.mediaUrl}
                       alt={item.prompt}
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                   </button>
@@ -300,7 +344,7 @@ export function PromptPanel({
             htmlFor="studio-prompt"
             className="text-xs font-semibold tracking-wide text-slate-300"
           >
-            Prompt
+            {strings.promptLabel}
           </label>
           <div className="flex items-center gap-2">
             {previousPrompt && (
@@ -324,7 +368,7 @@ export function PromptPanel({
               ) : (
                 <Wand2 className="h-3.5 w-3.5" />
               )}
-              {isEnhancing ? 'Enhancing...' : 'Magic Enhance Prompt'}
+              {isEnhancing ? strings.enhancing : strings.magicEnhance}
             </button>
           </div>
         </div>
@@ -336,8 +380,10 @@ export function PromptPanel({
           rows={4}
           placeholder={
             mode === 'image-to-video'
-              ? 'Describe how the subject, lighting, and camera should move...'
-              : 'Describe your scene, lighting, framing, and mood...'
+              ? strings.promptPlaceholderAnimate
+              : mode === 'text-to-video'
+              ? strings.promptPlaceholderVideo
+              : strings.promptPlaceholderImage
           }
           className="w-full resize-y rounded-xl border border-white/10 bg-[#07090E] px-4 py-3 text-sm leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
         />
@@ -365,23 +411,23 @@ export function PromptPanel({
       {/* Aspect Ratio */}
       <div className="space-y-2.5">
         <span className="block text-xs font-semibold tracking-wide text-slate-300">
-          Aspect Ratio
+          {strings.aspectRatio}
         </span>
         <div className="grid grid-cols-3 gap-2">
           {aspectOptions.map((ratio) => {
             const active = aspectRatio === ratio;
             const label =
               ratio === '16:9'
-                ? '16:9 Wide'
+                ? strings.ratioWide
                 : ratio === '9:16'
-                ? '9:16 Vertical'
-                : '1:1 Square';
+                ? strings.ratioVertical
+                : strings.ratioSquare;
             return (
               <button
                 key={ratio}
                 type="button"
                 onClick={() => onAspectRatioChange(ratio)}
-                className={`flex min-h-[42px] items-center justify-center gap-2 rounded-xl border px-3 py-2 text-xs font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                className={`flex min-h-[42px] items-center justify-center gap-1.5 rounded-xl border px-2.5 py-2 text-xs font-semibold whitespace-nowrap transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                   active
                     ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
                     : 'border-white/10 bg-[#07090E]/70 text-slate-400 hover:border-white/25 hover:text-slate-200'
@@ -389,7 +435,7 @@ export function PromptPanel({
               >
                 <span
                   aria-hidden="true"
-                  className={`inline-block rounded-[2px] border ${
+                  className={`inline-block shrink-0 rounded-[2px] border ${
                     active ? 'border-cyan-300' : 'border-slate-500'
                   } ${
                     ratio === '16:9'
@@ -399,7 +445,7 @@ export function PromptPanel({
                       : 'h-3.5 w-3.5'
                   }`}
                 />
-                {label}
+                <span className="truncate">{label}</span>
               </button>
             );
           })}
@@ -409,9 +455,9 @@ export function PromptPanel({
       {/* Style Presets */}
       <div className="space-y-2.5">
         <span className="block text-xs font-semibold tracking-wide text-slate-300">
-          Style Preset
+          {strings.stylePreset}
         </span>
-        <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
           {STYLE_PRESETS.map((preset) => {
             const active = stylePreset === preset.id;
             return (
@@ -419,7 +465,7 @@ export function PromptPanel({
                 key={preset.id}
                 type="button"
                 onClick={() => onStylePresetChange(preset.id)}
-                className={`group relative flex h-20 flex-col justify-end overflow-hidden rounded-xl border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                className={`group relative flex h-18 flex-col justify-end overflow-hidden rounded-xl border p-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                   active
                     ? 'border-cyan-400 ring-1 ring-cyan-400/50'
                     : 'border-white/10 hover:border-white/25'
@@ -430,8 +476,10 @@ export function PromptPanel({
                     <img
                       src={preset.thumbnail}
                       alt={preset.label}
+                      loading="lazy"
+                      decoding="async"
                       referrerPolicy="no-referrer"
-                      className="absolute inset-0 h-full w-full object-cover transition-transform duration-300 group-hover:scale-105"
+                      className="absolute inset-0 h-full w-full object-cover"
                     />
                     <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/45 to-black/15" />
                   </>
@@ -460,13 +508,13 @@ export function PromptPanel({
 
       {/* Video-specific Controls */}
       {isVideoMode && (
-        <div className="space-y-5 border-t border-white/[0.08] pt-5">
-          {/* Duration + HD Quality */}
+        <div className="space-y-4 border-t border-white/[0.08] pt-4">
+          {/* Duration + Render Quality */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
             <div className="space-y-2">
               <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
                 <Clock className="h-3.5 w-3.5 text-slate-400" />
-                Duration
+                {strings.duration}
               </span>
               <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-white/10 bg-[#07090E] p-1">
                 {(['5s', '10s', '15s'] as VideoDuration[]).map((dur) => (
@@ -486,7 +534,7 @@ export function PromptPanel({
               </div>
               {mode === 'text-to-video' && duration === '15s' && (
                 <p className="text-[11px] leading-snug text-cyan-300/80">
-                  Fetches 1 fast HD scene and renders 15s of live cinematic motion immediately.
+                  Generates 3 sequential Pollinations AI scenes and stitches a 15s video.
                 </p>
               )}
             </div>
@@ -494,7 +542,7 @@ export function PromptPanel({
             <div className="space-y-2">
               <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
                 <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
-                Render Quality
+                {strings.renderQuality}
               </span>
               <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/10 bg-[#07090E] p-1">
                 <button
@@ -506,7 +554,7 @@ export function PromptPanel({
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Fast Mode (720p)
+                  {strings.fastMode}
                 </button>
                 <button
                   type="button"
@@ -517,17 +565,17 @@ export function PromptPanel({
                       : 'text-slate-400 hover:text-slate-200'
                   }`}
                 >
-                  Ultra HD (1080p)
+                  {strings.ultraHd}
                 </button>
               </div>
             </div>
           </div>
 
           {/* Camera Motion Controls */}
-          <div className="space-y-2.5">
+          <div className="space-y-2">
             <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
               <Camera className="h-3.5 w-3.5 text-slate-400" />
-              Camera Motion
+              {strings.cameraMotion}
             </span>
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {CAMERA_MOTIONS.map((motion) => {
@@ -538,7 +586,7 @@ export function PromptPanel({
                     type="button"
                     onClick={() => onCameraMotionChange(motion.id)}
                     title={motion.hint}
-                    className={`min-h-[40px] rounded-xl border px-3 py-2 text-left text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                    className={`min-h-[38px] rounded-xl border px-3 py-1.5 text-left text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                       active
                         ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
                         : 'border-white/10 bg-[#07090E]/70 text-slate-400 hover:border-white/25 hover:text-slate-200'
@@ -551,17 +599,88 @@ export function PromptPanel({
             </div>
           </div>
 
+          {/* AI Voiceover & Background Music Audio Controls */}
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <button
+              type="button"
+              role="switch"
+              aria-checked={voiceoverEnabled}
+              onClick={() => onVoiceoverChange(!voiceoverEnabled)}
+              title={strings.voiceoverHint}
+              className={`flex min-h-[44px] items-center justify-between rounded-xl border px-3.5 py-2 text-left transition-colors ${
+                voiceoverEnabled
+                  ? 'border-cyan-400/60 bg-cyan-400/10 text-cyan-200'
+                  : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <span className="flex items-center gap-2 text-xs font-semibold truncate">
+                <Mic className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
+                <span className="truncate">{strings.voiceoverLabel}</span>
+              </span>
+              <span
+                aria-hidden="true"
+                className={`relative ml-2 inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                  voiceoverEnabled ? 'bg-cyan-400' : 'bg-slate-700'
+                }`}
+              >
+                <span
+                  className={`inline-block h-3.5 w-3.5 transform rounded-full bg-slate-950 transition-transform ${
+                    voiceoverEnabled ? 'translate-x-4.5' : 'translate-x-1'
+                  }`}
+                />
+              </span>
+            </button>
+
+            <div>
+              <input
+                ref={audioInputRef}
+                type="file"
+                accept="audio/*"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  onBackgroundMusicChange(file);
+                  e.target.value = '';
+                }}
+              />
+              {backgroundMusicFile ? (
+                <div className="flex min-h-[44px] items-center justify-between gap-2 rounded-xl border border-cyan-400/50 bg-cyan-400/10 px-3 py-2">
+                  <span className="flex items-center gap-2 text-xs font-medium text-cyan-200 truncate">
+                    <Music className="h-3.5 w-3.5 shrink-0 text-cyan-400" />
+                    <span className="truncate">{backgroundMusicFile.name}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => onBackgroundMusicChange(null)}
+                    className="text-[11px] font-semibold text-rose-300 hover:text-rose-200 shrink-0"
+                  >
+                    {strings.musicRemove}
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => audioInputRef.current?.click()}
+                  className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-[#07090E]/75 px-3 py-2 text-xs font-semibold text-slate-300 hover:border-cyan-400/50 hover:text-cyan-200 transition-colors"
+                >
+                  <Music className="h-3.5 w-3.5 text-cyan-400" />
+                  <span className="truncate">{strings.musicUpload}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
           {/* Optional Advanced Custom Backend Toggle */}
-          <div className="space-y-3 rounded-xl border border-white/10 bg-[#07090E]/75 p-4">
+          <div className="space-y-3 rounded-xl border border-white/10 bg-[#07090E]/75 p-3.5">
             <div className="flex items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <div className="text-xs font-semibold tracking-wide text-slate-200">
                   {videoSourceMode === 'demo'
-                    ? 'Free Built-In Video Engine (Active)'
+                    ? 'Free Unlimited Pollinations Engine (Active)'
                     : 'Custom Backend API (Active)'}
                 </div>
                 <div className="text-[11px] text-slate-500">
-                  Works 100% free with zero API keys required.
+                  Works 100% free with zero API keys or credit limits.
                 </div>
               </div>
               <button
@@ -623,10 +742,6 @@ export function PromptPanel({
                     {backendStatus.message}
                   </p>
                 )}
-
-                <p className="text-[11px] leading-relaxed text-slate-500">
-                  Requests will POST JSON {'{ prompt, style, duration, aspectRatio, cameraMotion, quality, image }'} to your custom endpoint.
-                </p>
               </div>
             )}
           </div>
@@ -643,21 +758,21 @@ export function PromptPanel({
         {isGenerating ? (
           <>
             <Loader2 className="h-4 w-4 animate-spin" />
-            Generating...
+            {strings.generatingBtn}
           </>
         ) : mode === 'text-to-image' ? (
           <>
             <ImagePlus className="h-4 w-4" />
-            Generate Full HD Image
+            {strings.generateImageBtn}
           </>
         ) : mode === 'text-to-video' ? (
           videoSourceMode === 'demo' ? (
-            'Generate Full HD Video'
+            strings.generateVideoBtn
           ) : (
             'Generate Video via Custom URL'
           )
         ) : videoSourceMode === 'demo' ? (
-          'Animate Image to Video'
+          strings.animateBtn
         ) : (
           'Animate via Custom URL'
         )}
