@@ -6,7 +6,14 @@ export type StylePresetId = 'realistic' | 'anime' | '3d-render' | 'cinematic' | 
 
 export type VideoDuration = '5s' | '10s' | '15s';
 
-export type VideoQuality = '1080p' | '720p';
+export type VideoQuality = '720p' | '1080p' | '4k';
+
+export interface DeveloperProfile {
+  avatarDataUrl: string | null;
+  youtubeUrl: string;
+  instagramUrl: string;
+  websiteUrl: string;
+}
 
 export type CameraMotionId =
   | 'dolly-push'

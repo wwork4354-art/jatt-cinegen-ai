@@ -1,3 +1,4 @@
+import { BadgeCheck } from 'lucide-react';
 import type { UIStrings } from '../lib/i18n';
 import type { StudioTab } from '../types/studio';
 
@@ -7,6 +8,7 @@ interface TopNavProps {
   creationsCount: number;
   onResetWorkspace: () => void;
   strings: UIStrings;
+  developerAvatarUrl?: string | null;
 }
 
 export function TopNav({
@@ -15,6 +17,7 @@ export function TopNav({
   creationsCount,
   onResetWorkspace,
   strings,
+  developerAvatarUrl,
 }: TopNavProps) {
   const navItems: { id: StudioTab; label: string }[] = [
     { id: 'text-to-video', label: strings.navTextToVideo },
@@ -25,15 +28,30 @@ export function TopNav({
 
   return (
     <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#07090E]/95">
-      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-8 px-4 py-3.5 sm:px-6 lg:px-8">
-        {/* Zone 1: Brand Wordmark */}
-        <button
-          type="button"
-          onClick={() => onSelectTab('text-to-video')}
-          className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 hover:text-cyan-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-md px-1"
-        >
-          Jatt CineGen AI
-        </button>
+      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-6 px-4 py-3.5 sm:px-6 lg:px-8">
+        {/* Zone 1: Brand Wordmark + Developer Badge */}
+        <div className="flex items-center gap-3 shrink-0">
+          <button
+            type="button"
+            onClick={() => onSelectTab('text-to-video')}
+            className="font-display text-lg font-bold tracking-tight text-white whitespace-nowrap shrink-0 hover:text-cyan-300 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-md px-1"
+          >
+            Jatt CineGen AI
+          </button>
+
+          <span className="hidden lg:inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-200 whitespace-nowrap shrink-0">
+            {developerAvatarUrl ? (
+              <img
+                src={developerAvatarUrl}
+                alt="Jatt Official"
+                className="h-4 w-4 rounded-full object-cover"
+              />
+            ) : (
+              <BadgeCheck className="h-3.5 w-3.5 text-cyan-400" />
+            )}
+            <span>Developed by Jatt Official</span>
+          </span>
+        </div>
 
         {/* Zone 2: Concise Single-Line Navigation Links */}
         <nav

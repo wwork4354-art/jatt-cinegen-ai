@@ -37,11 +37,14 @@ export interface RenderedVideoResult {
 
 function getDimensions(aspectRatio: AspectRatio, quality: VideoQuality): { width: number; height: number } {
   if (aspectRatio === '9:16') {
+    if (quality === '4k') return { width: 2160, height: 3840 };
     return quality === '1080p' ? { width: 1080, height: 1920 } : { width: 720, height: 1280 };
   }
   if (aspectRatio === '1:1') {
+    if (quality === '4k') return { width: 2160, height: 2160 };
     return quality === '1080p' ? { width: 1080, height: 1080 } : { width: 720, height: 720 };
   }
+  if (quality === '4k') return { width: 3840, height: 2160 };
   return quality === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
 }
 
@@ -407,7 +410,7 @@ export async function renderDemoVideo({
   const finalStream = new MediaStream(combinedTracks);
   const hasAudio = combinedTracks.some((t) => t.kind === 'audio');
   const mimeType = chooseSupportedMimeType(hasAudio);
-  const bitrate = quality === '1080p' ? 7_500_000 : 3_800_000;
+  const bitrate = quality === '4k' ? 14_000_000 : quality === '1080p' ? 7_500_000 : 3_800_000;
 
   const recorder = new MediaRecorder(finalStream, {
     mimeType,

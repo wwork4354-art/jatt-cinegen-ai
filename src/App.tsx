@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import { BadgeCheck } from 'lucide-react';
 import { TopNav } from './components/TopNav';
 import { PromptPanel } from './components/PromptPanel';
 import { PreviewStage } from './components/PreviewStage';
 import { CreationsGallery } from './components/CreationsGallery';
 import { ShareModal } from './components/ShareModal';
+import { DeveloperFooter } from './components/DeveloperFooter';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
@@ -14,6 +14,7 @@ import {
   type AspectRatio,
   type CameraMotionId,
   type CreationItem,
+  type DeveloperProfile,
   type GenerationProgress,
   type StudioTab,
   type StylePresetId,
@@ -24,6 +25,14 @@ import {
 
 const CUSTOM_BACKEND_STORAGE_KEY = 'vesper_custom_video_backend_url';
 const LANGUAGE_STORAGE_KEY = 'jatt_cinegen_language';
+const DEV_PROFILE_STORAGE_KEY = 'jatt_cinegen_developer_profile';
+
+const DEFAULT_DEV_PROFILE: DeveloperProfile = {
+  avatarDataUrl: null,
+  youtubeUrl: '',
+  instagramUrl: '',
+  websiteUrl: '',
+};
 
 interface PendingImageJob {
   url: string;
@@ -74,6 +83,17 @@ export default function App() {
     }
   });
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [developerProfile, setDeveloperProfile] = useState<DeveloperProfile>(() => {
+    try {
+      const saved = localStorage.getItem(DEV_PROFILE_STORAGE_KEY);
+      if (saved) {
+        return { ...DEFAULT_DEV_PROFILE, ...(JSON.parse(saved) as Partial<DeveloperProfile>) };
+      }
+    } catch {
+      // Ignore storage parse error
+    }
+    return DEFAULT_DEV_PROFILE;
+  });
 
   const [creations, setCreations] = useState<CreationItem[]>([]);
   const [activeCreationId, setActiveCreationId] = useState<string | null>(null);
@@ -127,6 +147,14 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [customBackendUrl]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEV_PROFILE_STORAGE_KEY, JSON.stringify(developerProfile));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [developerProfile]);
 
   const stopTimer = useCallback(() => {
     if (timerRef.current !== null) {
@@ -320,13 +348,17 @@ export default function App() {
             setIsLivePreviewActive((prev) => (prev ? prev : true));
             const target = liveCanvasRef.current;
             if (!target) return;
-            if (target.width !== sourceCanvas.width || target.height !== sourceCanvas.height) {
-              target.width = sourceCanvas.width;
-              target.height = sourceCanvas.height;
+            const maxPreviewSide = 1280;
+            const scale = Math.min(1, maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height));
+            const previewW = Math.round(sourceCanvas.width * scale);
+            const previewH = Math.round(sourceCanvas.height * scale);
+            if (target.width !== previewW || target.height !== previewH) {
+              target.width = previewW;
+              target.height = previewH;
             }
             const tctx = target.getContext('2d');
             if (tctx) {
-              tctx.drawImage(sourceCanvas, 0, 0);
+              tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
             }
           },
           onProgress: (percent, statusMessage, remainingSeconds) => {
@@ -338,6 +370,7 @@ export default function App() {
           },
         });
 
+        const qualityTag = quality === '4k' ? '4K Ultra HD' : quality;
         const item: CreationItem = {
           id: crypto.randomUUID(),
           kind: 'video',
@@ -352,8 +385,8 @@ export default function App() {
           quality,
           engineLabel:
             activeTab === 'text-to-video'
-              ? `Pollinations AI ${quality}`
-              : `CineGen ${quality} Animate`,
+              ? `Pollinations AI ${qualityTag}`
+              : `CineGen ${qualityTag} Animate`,
           scenes: result.scenes,
           mediaUrl: result.mediaUrl,
           mimeType: result.mimeType,
@@ -440,13 +473,19 @@ export default function App() {
 
       const dims =
         aspectRatio === '9:16'
-          ? quality === '1080p'
+          ? quality === '4k'
+            ? { width: 2160, height: 3840 }
+            : quality === '1080p'
             ? { width: 1080, height: 1920 }
             : { width: 720, height: 1280 }
           : aspectRatio === '1:1'
-          ? quality === '1080p'
+          ? quality === '4k'
+            ? { width: 2160, height: 2160 }
+            : quality === '1080p'
             ? { width: 1080, height: 1080 }
             : { width: 720, height: 720 }
+          : quality === '4k'
+          ? { width: 3840, height: 2160 }
           : quality === '1080p'
           ? { width: 1920, height: 1080 }
           : { width: 1280, height: 720 };
@@ -595,6 +634,7 @@ export default function App() {
         creationsCount={creations.length}
         onResetWorkspace={handleResetWorkspace}
         strings={strings}
+        developerAvatarUrl={developerProfile.avatarDataUrl}
       />
 
       <main className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-5 sm:px-6 lg:px-8 lg:py-8">
@@ -765,20 +805,11 @@ export default function App() {
         onDownload={handleDownload}
       />
 
-      <footer className="border-t border-white/[0.08] bg-[#07090E]/95">
-        <div className="mx-auto flex max-w-[1440px] flex-col items-center justify-between gap-3 px-4 py-5 text-xs text-slate-400 sm:flex-row sm:px-6 lg:px-8">
-          <div className="font-display text-sm font-semibold tracking-tight text-slate-200">
-            Jatt CineGen AI
-          </div>
-          <div className="flex items-center gap-3">
-            <span>{strings.footerCredit}</span>
-            <span className="inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-2.5 py-1 font-medium text-cyan-200">
-              <BadgeCheck className="h-3.5 w-3.5 text-cyan-400" />
-              Creator · Jatt Official
-            </span>
-          </div>
-        </div>
-      </footer>
+      <DeveloperFooter
+        profile={developerProfile}
+        onUpdateProfile={setDeveloperProfile}
+        footerCreditLabel={strings.footerCredit}
+      />
     </div>
   );
 }

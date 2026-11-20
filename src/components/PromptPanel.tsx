@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   Check,
@@ -8,6 +8,7 @@ import {
   Link2,
   Loader2,
   Mic,
+  MicOff,
   Music,
   RotateCcw,
   SlidersHorizontal,
@@ -65,6 +66,44 @@ interface PromptPanelProps {
   onGenerate: () => void;
 }
 
+const VOICE_INPUT_LANGUAGES = [
+  { code: 'en-US', label: 'EN', fullName: 'English' },
+  { code: 'ur-PK', label: 'اردو', fullName: 'Urdu' },
+  { code: 'pa-IN', label: 'ਪੰਜਾਬੀ', fullName: 'Punjabi' },
+  { code: 'hi-IN', label: 'हिन्दी', fullName: 'Hindi' },
+] as const;
+
+type VoiceLocaleCode = (typeof VOICE_INPUT_LANGUAGES)[number]['code'];
+
+interface SpeechRecognitionAlternativeLike {
+  transcript: string;
+}
+
+interface SpeechRecognitionResultLike {
+  isFinal: boolean;
+  0: SpeechRecognitionAlternativeLike;
+}
+
+interface SpeechRecognitionEventLike {
+  resultIndex: number;
+  results: ArrayLike<SpeechRecognitionResultLike>;
+}
+
+interface SpeechRecognitionErrorEventLike {
+  error: string;
+}
+
+interface SpeechRecognitionInstanceLike {
+  lang: string;
+  continuous: boolean;
+  interimResults: boolean;
+  onresult: ((event: SpeechRecognitionEventLike) => void) | null;
+  onerror: ((event: SpeechRecognitionErrorEventLike) => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+}
+
 const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations'>, string[]> = {
   'text-to-video': [
     'A majestic lion walking in a glowing cyberpunk jungle at sunset',
@@ -120,12 +159,120 @@ export function PromptPanel({
 }: PromptPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const recognitionRef = useRef<SpeechRecognitionInstanceLike | null>(null);
+  const promptRef = useRef(prompt);
+  promptRef.current = prompt;
+
   const [isDragging, setIsDragging] = useState(false);
+  const [voiceLang, setVoiceLang] = useState<VoiceLocaleCode>('en-US');
+  const [isListening, setIsListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
     ok?: boolean;
     message?: string;
   }>({ checking: false });
+
+  useEffect(() => {
+    if (language === 'ur') setVoiceLang('ur-PK');
+    else if (language === 'pa') setVoiceLang('pa-IN');
+    else if (language === 'hi') setVoiceLang('hi-IN');
+    else if (language === 'en') setVoiceLang('en-US');
+  }, [language]);
+
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+    };
+  }, []);
+
+  const toggleVoiceInput = () => {
+    setVoiceError(null);
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      setIsListening(false);
+      setInterimTranscript('');
+      return;
+    }
+
+    const SpeechRecCtor = (
+      window as unknown as {
+        SpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+        webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+      }
+    ).SpeechRecognition ||
+      (
+        window as unknown as {
+          webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+        }
+      ).webkitSpeechRecognition;
+
+    if (!SpeechRecCtor) {
+      setVoiceError('Voice input requires Chrome, Edge, or Safari SpeechRecognition support.');
+      return;
+    }
+
+    try {
+      const recognition = new SpeechRecCtor();
+      recognition.lang = voiceLang;
+      recognition.continuous = true;
+      recognition.interimResults = true;
+
+      recognition.onresult = (event) => {
+        let finalChunk = '';
+        let interimChunk = '';
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          const result = event.results[i];
+          const text = result[0]?.transcript ?? '';
+          if (result.isFinal) {
+            finalChunk += text;
+          } else {
+            interimChunk += text;
+          }
+        }
+        if (finalChunk.trim()) {
+          const current = promptRef.current.trim();
+          const appended = current ? `${current} ${finalChunk.trim()}` : finalChunk.trim();
+          onPromptChange(appended);
+        }
+        setInterimTranscript(interimChunk.trim());
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          setVoiceError('Microphone access denied. Please allow microphone permission.');
+        } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
+          setVoiceError(`Voice recognition error: ${event.error}`);
+        }
+        setIsListening(false);
+        setInterimTranscript('');
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        setInterimTranscript('');
+        recognitionRef.current = null;
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+      setIsListening(true);
+    } catch {
+      setVoiceError('Could not start voice recognition on this device.');
+      setIsListening(false);
+    }
+  };
 
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video';
   const aspectOptions: AspectRatio[] = ['16:9', '9:16', '1:1'];
@@ -373,20 +520,84 @@ export function PromptPanel({
           </div>
         </div>
 
-        <textarea
-          id="studio-prompt"
-          value={prompt}
-          onChange={(e) => onPromptChange(e.target.value)}
-          rows={4}
-          placeholder={
-            mode === 'image-to-video'
-              ? strings.promptPlaceholderAnimate
-              : mode === 'text-to-video'
-              ? strings.promptPlaceholderVideo
-              : strings.promptPlaceholderImage
-          }
-          className="w-full resize-y rounded-xl border border-white/10 bg-[#07090E] px-4 py-3 text-sm leading-relaxed text-slate-100 placeholder:text-slate-500 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
-        />
+        <div
+          className={`relative rounded-xl border bg-[#07090E] transition-colors ${
+            isListening
+              ? 'border-cyan-400 ring-2 ring-cyan-400/25'
+              : 'border-white/10 focus-within:border-cyan-400/70 focus-within:ring-2 focus-within:ring-cyan-400/25'
+          }`}
+        >
+          <textarea
+            id="studio-prompt"
+            value={prompt}
+            onChange={(e) => onPromptChange(e.target.value)}
+            rows={4}
+            placeholder={
+              mode === 'image-to-video'
+                ? strings.promptPlaceholderAnimate
+                : mode === 'text-to-video'
+                ? strings.promptPlaceholderVideo
+                : strings.promptPlaceholderImage
+            }
+            className="w-full resize-y rounded-t-xl bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed text-slate-100 placeholder:text-slate-500 focus:outline-none"
+          />
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] px-3 py-2">
+            <div className="flex items-center gap-1" role="group" aria-label="Voice input language">
+              {VOICE_INPUT_LANGUAGES.map((vLang) => {
+                const selected = voiceLang === vLang.code;
+                return (
+                  <button
+                    key={vLang.code}
+                    type="button"
+                    onClick={() => setVoiceLang(vLang.code)}
+                    title={`Speak in ${vLang.fullName}`}
+                    className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                      selected
+                        ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
+                        : 'text-slate-400 hover:bg-white/[0.05] hover:text-slate-200 border border-transparent'
+                    }`}
+                  >
+                    {vLang.label}
+                  </button>
+                );
+              })}
+            </div>
+
+            <button
+              type="button"
+              onClick={toggleVoiceInput}
+              aria-pressed={isListening}
+              aria-label={isListening ? 'Stop voice input' : 'Speak prompt with microphone'}
+              className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 ${
+                isListening
+                  ? 'border border-rose-400/70 bg-rose-500/20 text-rose-200 shadow-[0_0_20px_rgba(244,63,94,0.45)]'
+                  : 'border border-cyan-400/50 bg-cyan-400/15 text-cyan-200 shadow-[0_0_18px_rgba(34,211,238,0.35)] hover:bg-cyan-400/25 hover:shadow-[0_0_24px_rgba(34,211,238,0.55)]'
+              }`}
+            >
+              {isListening ? (
+                <>
+                  <MicOff className="h-3.5 w-3.5 text-rose-300" />
+                  <span>Listening...</span>
+                </>
+              ) : (
+                <>
+                  <Mic className="h-3.5 w-3.5 text-cyan-300" />
+                  <span>Voice Input</span>
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {(interimTranscript || voiceError) && (
+          <div className="text-xs px-1">
+            {interimTranscript && (
+              <p className="text-cyan-300/90 italic">Hearing: “{interimTranscript}”</p>
+            )}
+            {voiceError && <p className="text-amber-300">{voiceError}</p>}
+          </div>
+        )}
 
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
           <div className="flex flex-wrap items-center gap-1.5">
@@ -509,65 +720,80 @@ export function PromptPanel({
       {/* Video-specific Controls */}
       {isVideoMode && (
         <div className="space-y-4 border-t border-white/[0.08] pt-4">
-          {/* Duration + Render Quality */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div className="space-y-2">
-              <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
-                <Clock className="h-3.5 w-3.5 text-slate-400" />
-                {strings.duration}
-              </span>
-              <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-white/10 bg-[#07090E] p-1">
-                {(['5s', '10s', '15s'] as VideoDuration[]).map((dur) => (
-                  <button
-                    key={dur}
-                    type="button"
-                    onClick={() => onDurationChange(dur)}
-                    className={`min-h-[36px] rounded-lg text-xs font-semibold font-mono tabular-nums transition-colors ${
-                      duration === dur
-                        ? 'bg-cyan-400/20 text-cyan-200'
-                        : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                  >
-                    {dur}
-                  </button>
-                ))}
-              </div>
-              {mode === 'text-to-video' && duration === '15s' && (
-                <p className="text-[11px] leading-snug text-cyan-300/80">
-                  Generates 3 sequential Pollinations AI scenes and stitches a 15s video.
-                </p>
-              )}
+          {/* Duration */}
+          <div className="space-y-2">
+            <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
+              <Clock className="h-3.5 w-3.5 text-slate-400" />
+              {strings.duration}
+            </span>
+            <div className="grid grid-cols-3 gap-1.5 rounded-xl border border-white/10 bg-[#07090E] p-1">
+              {(['5s', '10s', '15s'] as VideoDuration[]).map((dur) => (
+                <button
+                  key={dur}
+                  type="button"
+                  onClick={() => onDurationChange(dur)}
+                  className={`min-h-[36px] rounded-lg text-xs font-semibold font-mono tabular-nums transition-colors ${
+                    duration === dur
+                      ? 'bg-cyan-400/20 text-cyan-200'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {dur}
+                </button>
+              ))}
             </div>
+            {mode === 'text-to-video' && duration === '15s' && (
+              <p className="text-[11px] leading-snug text-cyan-300/80">
+                Generates 3 sequential Pollinations AI scenes and stitches a 15s video.
+              </p>
+            )}
+          </div>
 
-            <div className="space-y-2">
-              <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
-                <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
-                {strings.renderQuality}
-              </span>
-              <div className="grid grid-cols-2 gap-1.5 rounded-xl border border-white/10 bg-[#07090E] p-1">
-                <button
-                  type="button"
-                  onClick={() => onQualityChange('720p')}
-                  className={`min-h-[36px] rounded-lg px-2 text-xs font-semibold whitespace-nowrap transition-colors ${
-                    quality === '720p'
-                      ? 'bg-cyan-400/20 text-cyan-200'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {strings.fastMode}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => onQualityChange('1080p')}
-                  className={`min-h-[36px] rounded-lg px-2 text-xs font-semibold whitespace-nowrap transition-colors ${
-                    quality === '1080p'
-                      ? 'bg-cyan-400/20 text-cyan-200'
-                      : 'text-slate-400 hover:text-slate-200'
-                  }`}
-                >
-                  {strings.ultraHd}
-                </button>
-              </div>
+          {/* 4K / HD Quality Export Selector */}
+          <div className="space-y-2">
+            <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
+              {strings.renderQuality}
+            </span>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+              <button
+                type="button"
+                onClick={() => onQualityChange('720p')}
+                className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                  quality === '720p'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                    : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+                }`}
+              >
+                <span className="text-xs font-semibold whitespace-nowrap">Fast 720p</span>
+                <span className="text-[11px] text-slate-400 whitespace-nowrap">3GB RAM Friendly</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onQualityChange('1080p')}
+                className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                  quality === '1080p'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                    : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+                }`}
+              >
+                <span className="text-xs font-semibold whitespace-nowrap">{strings.fullHdMode}</span>
+                <span className="text-[11px] font-mono tabular-nums text-slate-400 whitespace-nowrap">1920×1080</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onQualityChange('4k')}
+                className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
+                  quality === '4k'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                    : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+                }`}
+              >
+                <span className="text-xs font-semibold whitespace-nowrap">{strings.ultraHd}</span>
+                <span className="text-[11px] font-mono tabular-nums text-slate-400 whitespace-nowrap">3840×2160</span>
+              </button>
             </div>
           </div>
 

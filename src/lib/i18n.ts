@@ -58,6 +58,7 @@ export interface UIStrings {
   duration: string;
   renderQuality: string;
   fastMode: string;
+  fullHdMode: string;
   ultraHd: string;
   cameraMotion: string;
   voiceoverLabel: string;
@@ -107,9 +108,10 @@ const EN: UIStrings = {
   ratioSquare: '1:1 Square',
   stylePreset: 'Style Preset',
   duration: 'Duration',
-  renderQuality: 'Render Quality',
-  fastMode: 'Fast Mode (720p)',
-  ultraHd: 'Ultra HD (1080p)',
+  renderQuality: 'Export Quality',
+  fastMode: 'Fast 720p (3GB RAM Friendly)',
+  fullHdMode: '1080p Full HD',
+  ultraHd: '4K Ultra HD',
   cameraMotion: 'Camera Motion',
   voiceoverLabel: 'AI Voiceover (Speech)',
   voiceoverHint: 'Speaks prompt narration using browser voice synthesis',
