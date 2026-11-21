@@ -1,5 +1,5 @@
 import { translatePromptToEnglish } from './voiceLanguages';
-import { fetchFreeAiImageWithWaterfall } from './freeImageWaterfall';
+import { fetchFastVideoKeyframesParallel } from './freeImageWaterfall';
 import {
   type AspectRatio,
   type CameraMotionId,
@@ -50,7 +50,7 @@ function getDimensions(aspectRatio: AspectRatio, quality: VideoQuality): { width
   return quality === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
 }
 
-function loadImageElement(src: string, timeoutMs = 15000, minDimension = 16): Promise<HTMLImageElement> {
+function loadImageElement(src: string, timeoutMs = 10000, minDimension = 16): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -74,36 +74,11 @@ function loadImageElement(src: string, timeoutMs = 15000, minDimension = 16): Pr
   });
 }
 
-function buildSequentialScenes(prompt: string): [string, string, string] {
+function buildFastTwoScenes(prompt: string): [string, string] {
   return [
-    `Wide establishing cinematic opening shot: ${prompt}, dramatic atmospheric lighting, deep perspective`,
-    `Dynamic action mid-shot in full motion: ${prompt}, intense dramatic lighting, vivid detail`,
-    `Sweeping cinematic finale shot: ${prompt}, golden hour rim light, epic closing composition`,
+    `Wide establishing cinematic opening shot: ${prompt}, dramatic atmospheric lighting, rich depth`,
+    `Dynamic action finale close-up in full motion: ${prompt}, vivid volumetric rim light, epic climax`,
   ];
-}
-
-async function expandPromptToScenes(
-  prompt: string,
-  style: StylePresetId,
-  cameraMotion: CameraMotionId
-): Promise<[string, string, string]> {
-  try {
-    const res = await fetch('/api/expand-scenes', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, style, cameraMotion }),
-    });
-    const contentType = res.headers.get('content-type') || '';
-    if (res.ok && contentType.includes('application/json')) {
-      const data = (await res.json()) as { scenes?: string[] };
-      if (Array.isArray(data.scenes) && data.scenes.length >= 3) {
-        return [data.scenes[0], data.scenes[1], data.scenes[2]];
-      }
-    }
-  } catch {
-    // Fallback cleanly when Gemini key isn't configured
-  }
-  return buildSequentialScenes(prompt);
 }
 
 function chooseSupportedMimeType(hasAudio: boolean): string {
@@ -114,7 +89,7 @@ function chooseSupportedMimeType(hasAudio: boolean): string {
         'video/webm',
         'video/mp4',
       ]
-    : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+    : ['video/webm;codecs=vp8', 'video/webm;codecs=vp9', 'video/webm', 'video/mp4'];
   for (const mime of candidates) {
     if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(mime)) {
       return mime;
@@ -172,7 +147,6 @@ function drawKenBurnsImage(
       break;
   }
 
-  // Subtle organic camera shake
   if (motion !== 'static') {
     offsetX += Math.sin(localT * 24) * width * 0.002 + Math.cos(localT * 14) * width * 0.0014;
     offsetY += Math.cos(localT * 21) * height * 0.002;
@@ -200,6 +174,28 @@ function drawKenBurnsImage(
   ctx.restore();
 }
 
+function createCachedVignetteCanvas(width: number, height: number): HTMLCanvasElement {
+  const vCanvas = document.createElement('canvas');
+  vCanvas.width = width;
+  vCanvas.height = height;
+  const vctx = vCanvas.getContext('2d');
+  if (vctx) {
+    const vignette = vctx.createRadialGradient(
+      width / 2,
+      height / 2,
+      width * 0.28,
+      width / 2,
+      height / 2,
+      width * 0.78
+    );
+    vignette.addColorStop(0, 'rgba(0,0,0,0)');
+    vignette.addColorStop(1, 'rgba(4,6,11,0.34)');
+    vctx.fillStyle = vignette;
+    vctx.fillRect(0, 0, width, height);
+  }
+  return vCanvas;
+}
+
 export async function renderDemoVideo({
   prompt,
   aspectRatio,
@@ -217,77 +213,47 @@ export async function renderDemoVideo({
 }: RenderDemoVideoParams): Promise<RenderedVideoResult> {
   const { width, height } = getDimensions(aspectRatio, quality);
   const totalSeconds = duration === '15s' ? 15 : duration === '10s' ? 10 : 5;
-  const isMultiScene15s = duration === '15s' && !sourceImageDataUrl;
 
   const sceneImages: HTMLImageElement[] = [];
-  const tempObjectUrls: string[] = [];
+  const tempObjectUrls = new Set<string>();
   let sceneDescriptions: string[] | undefined;
 
   if (sourceImageDataUrl) {
-    onProgress(8, 'Preparing uploaded image...', totalSeconds);
-    const uploaded = await loadImageElement(sourceImageDataUrl, 15000, 16);
+    onProgress(12, 'Preparing uploaded image...', totalSeconds);
+    const uploaded = await loadImageElement(sourceImageDataUrl, 10000, 16);
     sceneImages.push(uploaded);
   } else {
-    onProgress(5, 'Preparing AI visual prompt...', totalSeconds);
-    const { englishPrompt } = await translatePromptToEnglish(prompt, voiceLanguageId);
-    const visualPrompt = englishPrompt || prompt;
+    onProgress(10, 'Preparing fast AI keyframes...', totalSeconds);
+    // Race translation with a strict 2.5s timeout so prompt prep never stalls
+    const translated = await Promise.race([
+      translatePromptToEnglish(prompt, voiceLanguageId),
+      new Promise<{ englishPrompt: string; wasTranslated: boolean }>((resolve) =>
+        setTimeout(() => resolve({ englishPrompt: prompt, wasTranslated: false }), 2500)
+      ),
+    ]);
+    const visualPrompt = translated.englishPrompt || prompt;
+    const fastScenes = buildFastTwoScenes(visualPrompt);
+    sceneDescriptions = fastScenes;
 
-    if (isMultiScene15s) {
-      onProgress(8, 'Generating AI Scenes (expanding storyboard)...', totalSeconds);
-      const expanded = await expandPromptToScenes(visualPrompt, style, cameraMotion);
-      sceneDescriptions = expanded;
-      const baseSeed = Math.floor(100000 + Math.random() * 8999999);
+    const [k1, k2] = await fetchFastVideoKeyframesParallel({
+      scenePrompts: fastScenes,
+      aspectRatio,
+      style,
+      onStatus: (msg) => onProgress(22, msg, totalSeconds),
+    });
 
-      // Fetch Scene 1 via multi-provider waterfall (Pollinations Flux -> Turbo -> Airforce -> AI Horde)
-      onProgress(12, 'Generating AI Scene 1 of 3...', totalSeconds);
-      const scene1Result = await fetchFreeAiImageWithWaterfall({
-        prompt: expanded[0],
-        aspectRatio,
-        style,
-        seed: baseSeed,
-        onStatus: (msg) => onProgress(12, `Scene 1/3: ${msg}`, totalSeconds),
-      });
-      sceneImages.push(scene1Result.img);
-      tempObjectUrls.push(scene1Result.objectUrl);
-
-      // Attempt Scene 2 & Scene 3 via backup providers cleanly; reuse validated Scene 1 if busy
-      for (let idx = 1; idx < 3; idx += 1) {
-        const pct = 18 + idx * 8;
-        onProgress(pct, `Generating AI Scene ${idx + 1} of 3...`, totalSeconds);
-        try {
-          const nextResult = await fetchFreeAiImageWithWaterfall({
-            prompt: expanded[idx],
-            aspectRatio,
-            style,
-            seed: baseSeed + idx * 173,
-            onStatus: (msg) => onProgress(pct, `Scene ${idx + 1}/3: ${msg}`, totalSeconds),
-          });
-          sceneImages.push(nextResult.img);
-          tempObjectUrls.push(nextResult.objectUrl);
-        } catch {
-          sceneImages.push(scene1Result.img);
-        }
-      }
-    } else {
-      onProgress(10, 'Generating AI Scene...', totalSeconds);
-      const mainResult = await fetchFreeAiImageWithWaterfall({
-        prompt: visualPrompt,
-        aspectRatio,
-        style,
-        onStatus: (msg) => onProgress(14, msg, totalSeconds),
-      });
-      sceneImages.push(mainResult.img);
-      tempObjectUrls.push(mainResult.objectUrl);
-    }
+    sceneImages.push(k1.img, k2.img);
+    tempObjectUrls.add(k1.objectUrl);
+    tempObjectUrls.add(k2.objectUrl);
   }
 
-  const startPercent = isMultiScene15s ? 35 : 22;
-  onProgress(startPercent, `Rendering: ${totalSeconds}s remaining...`, totalSeconds);
+  const startPercent = 35;
+  onProgress(startPercent, `Rendering ${totalSeconds}s @ 30fps · ${totalSeconds}s remaining...`, totalSeconds);
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
   canvas.height = height;
-  const ctx = canvas.getContext('2d');
+  const ctx = canvas.getContext('2d', { alpha: false });
   if (!ctx) {
     throw new Error('Browser canvas 2D context is unavailable.');
   }
@@ -296,8 +262,10 @@ export async function renderDemoVideo({
     throw new Error('Your browser does not support MediaRecorder video encoding.');
   }
 
-  // Keep fps at 24 for ultra-smooth 3GB RAM mobile performance
-  const fps = 24;
+  // Fast 30fps capture stream with cached static vignette overlay for 3GB RAM efficiency
+  const fps = 30;
+  const frameIntervalMs = 1000 / fps;
+  const cachedVignette = createCachedVignetteCanvas(width, height);
   const videoStream = canvas.captureStream(fps);
   const combinedTracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
 
@@ -323,7 +291,6 @@ export async function renderDemoVideo({
       audioSourceNode.start(0);
       combinedTracks.push(...dest.stream.getAudioTracks());
     } catch {
-      // Proceed cleanly with video-only if audio decode fails
       if (audioContext) {
         audioContext.close().catch(() => {});
         audioContext = null;
@@ -331,7 +298,6 @@ export async function renderDemoVideo({
     }
   }
 
-  // Trigger optional AI Voiceover via Web Speech API
   if (voiceoverEnabled && typeof window !== 'undefined' && 'speechSynthesis' in window) {
     try {
       window.speechSynthesis.cancel();
@@ -347,7 +313,7 @@ export async function renderDemoVideo({
   const finalStream = new MediaStream(combinedTracks);
   const hasAudio = combinedTracks.some((t) => t.kind === 'audio');
   const mimeType = chooseSupportedMimeType(hasAudio);
-  const bitrate = quality === '4k' ? 14_000_000 : quality === '1080p' ? 7_500_000 : 3_800_000;
+  const bitrate = quality === '4k' ? 14_000_000 : quality === '1080p' ? 6_500_000 : 3_200_000;
 
   const recorder = new MediaRecorder(finalStream, {
     mimeType,
@@ -361,20 +327,19 @@ export async function renderDemoVideo({
     }
   };
 
-  // Lightweight particle count (28) for smooth 3GB RAM playback
-  const particles = Array.from({ length: 28 }, (_, idx) => ({
+  // Lightweight particle set (24) pre-computed for smooth 30fps rendering on 3GB RAM phones
+  const particles = Array.from({ length: 24 }, (_, idx) => ({
     x: ((idx * 197) % 1000) / 1000,
     y: ((idx * 353) % 1000) / 1000,
-    radius: idx % 6 === 0 ? 3.8 : 1.4 + (idx % 3) * 0.7,
+    radius: (idx % 6 === 0 ? 3.4 : 1.3 + (idx % 3) * 0.65) * (width / 1280),
     speedX: ((idx % 5) - 2) * 0.0045,
     speedY: -0.007 - (idx % 3) * 0.0035,
-    alpha: idx % 6 === 0 ? 0.1 : 0.18,
+    fillStyle: idx % 6 === 0 ? 'rgba(165, 243, 252, 0.12)' : 'rgba(165, 243, 252, 0.2)',
   }));
 
-  const sceneMotions: [CameraMotionId, CameraMotionId, CameraMotionId] = [
+  const sceneMotions: [CameraMotionId, CameraMotionId] = [
     cameraMotion === 'static' ? 'dolly-push' : cameraMotion,
-    cameraMotion === 'slow-pan' ? 'dolly-push' : 'slow-pan',
-    cameraMotion === 'aerial-orbit' ? 'crane-up' : 'aerial-orbit',
+    cameraMotion === 'slow-pan' ? 'aerial-orbit' : 'slow-pan',
   ];
 
   const recordingFinished = new Promise<Blob>((resolve, reject) => {
@@ -385,32 +350,39 @@ export async function renderDemoVideo({
     recorder.onerror = () => reject(new Error('Video recording failed.'));
   });
 
-  recorder.start(250);
+  recorder.start(500);
 
   const startTime = performance.now();
   const totalMs = totalSeconds * 1000;
-  const crossfadeSec = 0.6;
+  const crossfadeSec = 0.75;
+  const hasTwoScenes = sceneImages.length >= 2;
+  const splitSec = totalSeconds / 2;
+
+  let lastFrameAt = 0;
+  let lastProgressAt = 0;
 
   try {
     await new Promise<void>((resolve) => {
-      const drawFrame = () => {
-        const elapsed = performance.now() - startTime;
+      const tick = (now: number) => {
+        const elapsed = now - startTime;
+        if (elapsed < totalMs && now - lastFrameAt < frameIntervalMs - 2) {
+          requestAnimationFrame(tick);
+          return;
+        }
+        lastFrameAt = now;
+
         const t = Math.min(1, elapsed / totalMs);
         const currentSec = t * totalSeconds;
 
         ctx.fillStyle = '#07090E';
         ctx.fillRect(0, 0, width, height);
 
-        if (isMultiScene15s && sceneImages.length >= 3) {
-          const segDur = 5;
-          const sceneIdx = Math.min(2, Math.floor(currentSec / segDur));
-          const sceneElapsed = currentSec - sceneIdx * segDur;
-          const localT = Math.min(1, sceneElapsed / segDur);
-
-          // If reusing Scene 1 fallback for act 2/3 due to rate limit, apply distinct zoom/pan bias
-          const reused = sceneIdx > 0 && sceneImages[sceneIdx] === sceneImages[0];
-          const biasX = reused ? (sceneIdx === 1 ? -0.035 : 0.035) : 0;
-          const zoomBoost = reused ? (sceneIdx === 1 ? 1.08 : 1.04) : 1;
+        if (hasTwoScenes) {
+          const inScene2 = currentSec >= splitSec;
+          const sceneIdx = inScene2 ? 1 : 0;
+          const sceneElapsed = inScene2 ? currentSec - splitSec : currentSec;
+          const localT = Math.min(1, sceneElapsed / splitSec);
+          const reused = sceneImages[1] === sceneImages[0];
 
           drawKenBurnsImage(
             ctx,
@@ -420,90 +392,80 @@ export async function renderDemoVideo({
             localT,
             sceneMotions[sceneIdx],
             1,
-            biasX,
-            zoomBoost
+            reused ? (sceneIdx === 1 ? 0.035 : -0.025) : 0,
+            reused && sceneIdx === 1 ? 1.09 : 1
           );
 
-          if (sceneIdx < 2 && sceneElapsed > segDur - crossfadeSec) {
-            const fadeT = (sceneElapsed - (segDur - crossfadeSec)) / crossfadeSec;
-            const nextReused = sceneImages[sceneIdx + 1] === sceneImages[0];
+          if (sceneIdx === 0 && currentSec > splitSec - crossfadeSec) {
+            const fadeT = (currentSec - (splitSec - crossfadeSec)) / crossfadeSec;
             drawKenBurnsImage(
               ctx,
-              sceneImages[sceneIdx + 1],
+              sceneImages[1],
               width,
               height,
               0,
-              sceneMotions[sceneIdx + 1],
+              sceneMotions[1],
               Math.min(1, Math.max(0, fadeT)),
-              nextReused ? (sceneIdx + 1 === 1 ? -0.035 : 0.035) : 0,
-              nextReused ? 1.08 : 1
+              reused ? 0.035 : 0,
+              reused ? 1.09 : 1
             );
           }
         } else {
           drawKenBurnsImage(ctx, sceneImages[0], width, height, t, cameraMotion, 1);
         }
 
-        // Dynamic neon lighting glow sweep
-        const glowPulse = 0.055 + Math.sin(t * Math.PI * 2) * 0.025;
+        // Dynamic atmospheric light sweep
         const sweepX = (t * 1.35 - 0.18) * width;
         const beam = ctx.createLinearGradient(
-          sweepX - width * 0.25,
+          sweepX - width * 0.22,
           0,
-          sweepX + width * 0.25,
+          sweepX + width * 0.22,
           height
         );
         beam.addColorStop(0, 'rgba(255, 255, 255, 0)');
-        beam.addColorStop(0.5, `rgba(34, 211, 238, ${glowPulse.toFixed(3)})`);
+        beam.addColorStop(0.5, 'rgba(34, 211, 238, 0.065)');
         beam.addColorStop(1, 'rgba(255, 255, 255, 0)');
         ctx.fillStyle = beam;
         ctx.fillRect(0, 0, width, height);
 
-        // Neon atmospheric particles
+        // Lightweight glowing particles
         for (const p of particles) {
           const px = (((p.x + t * p.speedX * 12) % 1) + 1) % 1 * width;
           const py = (((p.y + t * p.speedY * 12) % 1) + 1) % 1 * height;
+          ctx.fillStyle = p.fillStyle;
           ctx.beginPath();
-          ctx.arc(px, py, p.radius * (width / 1280), 0, Math.PI * 2);
-          ctx.fillStyle = `rgba(165, 243, 252, ${p.alpha})`;
+          ctx.arc(px, py, p.radius, 0, Math.PI * 2);
           ctx.fill();
         }
 
-        // Clean cinema vignette
-        const vignette = ctx.createRadialGradient(
-          width / 2,
-          height / 2,
-          width * 0.28,
-          width / 2,
-          height / 2,
-          width * 0.78
-        );
-        vignette.addColorStop(0, 'rgba(0,0,0,0)');
-        vignette.addColorStop(1, 'rgba(4,6,11,0.32)');
-        ctx.fillStyle = vignette;
-        ctx.fillRect(0, 0, width, height);
+        // Composite pre-rendered cinema vignette (zero per-frame gradient allocation)
+        ctx.drawImage(cachedVignette, 0, 0);
 
         if (onFrameCanvas) {
           onFrameCanvas(canvas);
         }
 
-        const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
-        const percentRange = 97 - startPercent;
-        const percent = Math.min(97, Math.round(startPercent + t * percentRange));
-
-        onProgress(
-          percent,
-          `Rendering ${totalSeconds}s Video · ${remainingSec}s remaining...`,
-          remainingSec
-        );
+        // Throttle React progress state updates to 4Hz (every 250ms) to avoid 3GB RAM UI lag
+        if (now - lastProgressAt >= 250 || elapsed >= totalMs) {
+          lastProgressAt = now;
+          const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
+          const percentRange = 97 - startPercent;
+          const percent = Math.min(97, Math.round(startPercent + t * percentRange));
+          onProgress(
+            percent,
+            `Rendering ${totalSeconds}s Video · ${remainingSec}s remaining...`,
+            remainingSec
+          );
+        }
 
         if (elapsed < totalMs) {
-          setTimeout(() => requestAnimationFrame(drawFrame), 1000 / fps);
+          requestAnimationFrame(tick);
         } else {
           resolve();
         }
       };
 
-      requestAnimationFrame(drawFrame);
+      requestAnimationFrame(tick);
     });
   } finally {
     if (audioSourceNode) {

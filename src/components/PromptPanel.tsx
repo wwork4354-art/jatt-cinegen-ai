@@ -831,7 +831,7 @@ export function PromptPanel({
             </div>
             {mode === 'text-to-video' && duration === '15s' && (
               <p className="text-[11px] leading-snug text-cyan-300/80">
-                Generates 3 sequential Pollinations AI scenes and stitches a 15s video.
+                Fetches 2 keyframes in parallel (6s max) and renders a smooth 15s 30fps video.
               </p>
             )}
           </div>

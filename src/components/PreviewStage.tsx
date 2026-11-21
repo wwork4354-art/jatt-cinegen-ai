@@ -314,14 +314,25 @@ export function PreviewStage({
       )}
 
       {activeCreation?.scenes && activeCreation.scenes.length > 0 && !progress.active && (
-        <div className="mt-4 grid grid-cols-1 gap-3 border-t border-white/[0.06] pt-4 md:grid-cols-3">
+        <div
+          className={`mt-4 grid grid-cols-1 gap-3 border-t border-white/[0.06] pt-4 ${
+            activeCreation.scenes.length === 2 ? 'md:grid-cols-2' : 'md:grid-cols-3'
+          }`}
+        >
           {activeCreation.scenes.map((sceneText, idx) => (
             <div
               key={idx}
               className="rounded-xl border border-white/[0.06] bg-[#07090E]/70 p-3 space-y-1"
             >
               <div className="text-[11px] font-mono tabular-nums text-cyan-300">
-                Scene 0{idx + 1} · {idx === 0 ? 'Opening Act' : idx === 1 ? 'Action & Motion' : 'Closing Resolve'}
+                Keyframe 0{idx + 1} ·{' '}
+                {idx === 0
+                  ? 'Opening Act'
+                  : activeCreation.scenes!.length === 2
+                  ? 'Action & Finale'
+                  : idx === 1
+                  ? 'Action & Motion'
+                  : 'Closing Resolve'}
               </div>
               <p className="text-xs leading-relaxed text-slate-300 line-clamp-2">
                 {sceneText}

@@ -1,4 +1,5 @@
 import { STYLE_PROMPT_SUFFIX, type AspectRatio, type StylePresetId } from '../types/studio';
+import { generateProceduralSceneImage } from './proceduralSceneCanvas';
 
 export interface FetchedAiImageResult {
   img: HTMLImageElement;
@@ -414,4 +415,127 @@ export async function fetchFreeAiImageWithWaterfall(params: {
   throw new Error(
     'Free AI image providers are temporarily busy. Please wait a few seconds and click Generate again.'
   );
+}
+
+export function getFastVideoDimensions(aspectRatio: AspectRatio): {
+  fetchWidth: number;
+  fetchHeight: number;
+} {
+  if (aspectRatio === '9:16') {
+    return { fetchWidth: 432, fetchHeight: 768 };
+  }
+  if (aspectRatio === '1:1') {
+    return { fetchWidth: 512, fetchHeight: 512 };
+  }
+  return { fetchWidth: 768, fetchHeight: 432 };
+}
+
+export interface FastKeyframeResult {
+  img: HTMLImageElement;
+  objectUrl: string;
+  isProcedural: boolean;
+}
+
+async function fetchSingleFastKeyframe(params: {
+  scenePrompt: string;
+  aspectRatio: AspectRatio;
+  style: StylePresetId;
+  seed: number;
+  sceneIndex: number;
+}): Promise<FastKeyframeResult> {
+  const { scenePrompt, aspectRatio, style, seed, sceneIndex } = params;
+  const { fetchWidth, fetchHeight } = getFastVideoDimensions(aspectRatio);
+  const styleSuffix = STYLE_PROMPT_SUFFIX[style] ?? '';
+  const cleanPrompt = sanitizeSafePrompt(
+    styleSuffix ? `${scenePrompt}, ${styleSuffix}` : scenePrompt
+  );
+  const encodedPrompt = encodeURIComponent(cleanPrompt);
+
+  const deadline = Date.now() + 6000;
+
+  const fastTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&model=turbo&nologo=true&seed=${seed}`;
+  const backupAirforceUrl = `https://api.airforce/imagine2?model=flux&prompt=${encodedPrompt}`;
+
+  const candidates = [
+    { url: fastTurboUrl, label: 'Pollinations Turbo', strict: true },
+    { url: backupAirforceUrl, label: 'Airforce Flux', strict: false },
+  ];
+
+  for (const candidate of candidates) {
+    const remainingMs = deadline - Date.now();
+    if (remainingMs < 900) break;
+
+    try {
+      const { result } = await fetchAndValidateImageUrl(
+        candidate.url,
+        fetchWidth,
+        fetchHeight,
+        candidate.strict,
+        candidate.label,
+        remainingMs
+      );
+      return {
+        img: result.img,
+        objectUrl: result.objectUrl,
+        isProcedural: false,
+      };
+    } catch {
+      // Immediately move to next backup or procedural fallback within 6s budget
+    }
+  }
+
+  // Instant Procedural Cinematic Canvas Fallback (under 40ms, zero hanging)
+  const proc = await generateProceduralSceneImage({
+    prompt: scenePrompt,
+    aspectRatio,
+    style,
+    sceneIndex,
+  });
+  return {
+    img: proc.img,
+    objectUrl: proc.objectUrl,
+    isProcedural: true,
+  };
+}
+
+export async function fetchFastVideoKeyframesParallel(params: {
+  scenePrompts: [string, string];
+  aspectRatio: AspectRatio;
+  style: StylePresetId;
+  onStatus?: (msg: string) => void;
+}): Promise<[FastKeyframeResult, FastKeyframeResult]> {
+  const { scenePrompts, aspectRatio, style, onStatus } = params;
+  const baseSeed = Math.floor(100000 + Math.random() * 8999999);
+
+  onStatus?.('Fetching 2 parallel keyframes (6s fast timeout)...');
+
+  const [k1, k2] = await Promise.all([
+    fetchSingleFastKeyframe({
+      scenePrompt: scenePrompts[0],
+      aspectRatio,
+      style,
+      seed: baseSeed,
+      sceneIndex: 0,
+    }),
+    fetchSingleFastKeyframe({
+      scenePrompt: scenePrompts[1],
+      aspectRatio,
+      style,
+      seed: baseSeed + 99,
+      sceneIndex: 1,
+    }),
+  ]);
+
+  // If Keyframe 1 got a real AI image and Keyframe 2 fell back to procedural due to 45s IP limit,
+  // share the real AI image for seamless photorealistic continuity.
+  if (!k1.isProcedural && k2.isProcedural) {
+    URL.revokeObjectURL(k2.objectUrl);
+    return [k1, { img: k1.img, objectUrl: k1.objectUrl, isProcedural: false }];
+  }
+  if (k1.isProcedural && !k2.isProcedural) {
+    URL.revokeObjectURL(k1.objectUrl);
+    return [{ img: k2.img, objectUrl: k2.objectUrl, isProcedural: false }, k2];
+  }
+
+  return [k1, k2];
 }
