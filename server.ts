@@ -106,7 +106,78 @@ async function startServer() {
     }
   });
 
-  // 1b. Expand a single prompt into 3 sequential scenes for 15s multi-scene video
+  // 1b. Translate multilingual voice/text prompt into vivid English for Pollinations AI
+  app.post('/api/translate-prompt', async (req, res) => {
+    try {
+      const { prompt, sourceLanguage, translateHintCode } = req.body as {
+        prompt?: string;
+        sourceLanguage?: string;
+        translateHintCode?: string;
+      };
+
+      const cleanPrompt = (prompt || '').trim();
+      if (!cleanPrompt) {
+        res.status(400).json({ error: 'Prompt is required.' });
+        return;
+      }
+
+      const hasNonAscii = /[^\x20-\x7E\r\n\t]/.test(cleanPrompt);
+      if (!hasNonAscii && (!sourceLanguage || sourceLanguage === 'English')) {
+        res.json({ translatedPrompt: cleanPrompt, wasTranslated: false });
+        return;
+      }
+
+      if (process.env.GEMINI_API_KEY) {
+        try {
+          const ai = getGeminiClient();
+          const langNote = sourceLanguage ? ` (spoken/written in ${sourceLanguage})` : '';
+          const response = await ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: `Translate this visual image/video generation prompt${langNote} into clear, vivid, natural English suitable for an AI image/video generator. If it is already English, refine grammar slightly without losing any meaning. Return ONLY the English prompt with no quotes or explanation:\n\n${cleanPrompt}`,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              systemInstruction:
+                'You are a multilingual translator specializing in South Asian, Middle Eastern, East Asian, and European languages (including Urdu, Punjabi, Saraiki, Pashto, Balochi, Hindi, Bengali, Persian, Arabic, Tamil, Marathi, Sanskrit, Russian, Chinese). Translate accurately to natural descriptive English. Return ONLY the translated English text.',
+            },
+          });
+
+          const translated = (response.text ?? '').trim().replace(/^["']|["']$/g, '');
+          if (translated) {
+            res.json({ translatedPrompt: translated, wasTranslated: translated !== cleanPrompt });
+            return;
+          }
+        } catch {
+          // Fall through to free zero-key translation fallback below
+        }
+      }
+
+      // Free zero-key translation fallback via Google Translate public GTX endpoint
+      const sl = translateHintCode && translateHintCode !== 'en' ? translateHintCode : 'auto';
+      const gtxUrl = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${encodeURIComponent(
+        sl
+      )}&tl=en&dt=t&q=${encodeURIComponent(cleanPrompt)}`;
+      const gtxRes = await fetch(gtxUrl);
+      if (gtxRes.ok) {
+        const gtxData = (await gtxRes.json()) as unknown[];
+        if (Array.isArray(gtxData[0])) {
+          const translated = gtxData[0]
+            .map((segment) => (Array.isArray(segment) && typeof segment[0] === 'string' ? segment[0] : ''))
+            .join('')
+            .trim();
+          if (translated) {
+            res.json({ translatedPrompt: translated, wasTranslated: translated !== cleanPrompt });
+            return;
+          }
+        }
+      }
+
+      res.json({ translatedPrompt: cleanPrompt, wasTranslated: false });
+    } catch {
+      res.json({ translatedPrompt: (req.body as { prompt?: string })?.prompt || '', wasTranslated: false });
+    }
+  });
+
+  // 1c. Expand a single prompt into 3 sequential scenes for 15s multi-scene video
   app.post('/api/expand-scenes', async (req, res) => {
     try {
       const { prompt, style, cameraMotion } = req.body as {
@@ -127,7 +198,7 @@ async function startServer() {
 
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: `Break this single video idea into 3 connected sequential 5-second film scenes (Scene 1: Beginning, Scene 2: Action/Middle, Scene 3: Ending). Keep characters, setting, and lighting visually consistent across all 3 scenes. Prompt: "${cleanPrompt}". ${styleHint} ${cameraHint}`,
+        contents: `Break this single video idea into 3 connected sequential 5-second film scenes in clear descriptive English (Scene 1: Beginning, Scene 2: Action/Middle, Scene 3: Ending). Keep characters, setting, and lighting visually consistent across all 3 scenes. Prompt: "${cleanPrompt}". ${styleHint} ${cameraHint}`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
@@ -137,13 +208,13 @@ async function startServer() {
               scenes: {
                 type: Type.ARRAY,
                 items: { type: Type.STRING },
-                description: 'Exactly 3 sequential visual scene prompts under 45 words each.',
+                description: 'Exactly 3 sequential visual scene prompts in English under 45 words each.',
               },
             },
             required: ['scenes'],
           },
           systemInstruction:
-            'You are a film director creating a 3-shot 15-second storyboard. Return exactly 3 vivid, cohesive scene prompts representing Beginning, Middle Action, and Ending payoff.',
+            'You are a film director creating a 3-shot 15-second storyboard. Always output the 3 scene prompts in vivid descriptive English (translate if the input prompt is in another language) representing Beginning, Middle Action, and Ending payoff.',
         },
       });
 

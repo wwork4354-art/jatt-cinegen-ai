@@ -9,6 +9,7 @@ import { DeveloperFooter } from './components/DeveloperFooter';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
+import { translatePromptToEnglish } from './lib/voiceLanguages';
 import {
   buildPollinationsImageUrl,
   type AspectRatio,
@@ -62,6 +63,7 @@ export default function App() {
       return 'en';
     }
   });
+  const [voiceLanguageId, setVoiceLanguageId] = useState<string>('en');
 
   const [prompt, setPrompt] = useState('');
   const [previousPrompt, setPreviousPrompt] = useState<string | null>(null);
@@ -291,16 +293,17 @@ export default function App() {
 
     setErrorMessage(null);
 
-    // Direct frontend Pollinations AI <img> generation
+    // Direct frontend Pollinations AI <img> generation (with automatic English translation under the hood)
     if (activeTab === 'text-to-image') {
+      startTimer('Rendering Full HD image via Pollinations AI...');
+      const { englishPrompt } = await translatePromptToEnglish(trimmedPrompt, voiceLanguageId);
       const { url, width, height } = buildPollinationsImageUrl(
-        trimmedPrompt,
+        englishPrompt || trimmedPrompt,
         aspectRatio,
         stylePreset,
         Date.now()
       );
 
-      startTimer('Rendering Full HD image via Pollinations AI...');
       stageTimersRef.current.push(
         window.setTimeout(() => {
           setProgress((p) =>
@@ -344,6 +347,7 @@ export default function App() {
           backgroundMusicFile,
           voiceoverEnabled,
           speechLocale: langMeta.speechLocale,
+          voiceLanguageId,
           onFrameCanvas: (sourceCanvas) => {
             setIsLivePreviewActive((prev) => (prev ? prev : true));
             const target = liveCanvasRef.current;
@@ -670,6 +674,8 @@ export default function App() {
                   mode={activeTab}
                   language={language}
                   onLanguageChange={setLanguage}
+                  voiceLanguageId={voiceLanguageId}
+                  onVoiceLanguageChange={setVoiceLanguageId}
                   strings={strings}
                   prompt={prompt}
                   onPromptChange={setPrompt}

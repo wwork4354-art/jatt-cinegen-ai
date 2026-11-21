@@ -18,6 +18,11 @@ import {
 } from 'lucide-react';
 import { LANGUAGES, type LanguageCode, type UIStrings } from '../lib/i18n';
 import {
+  getVoiceLanguageById,
+  MORE_VOICE_LANGUAGES,
+  QUICK_VOICE_LANGUAGES,
+} from '../lib/voiceLanguages';
+import {
   CAMERA_MOTIONS,
   STYLE_PRESETS,
   type AspectRatio,
@@ -34,6 +39,8 @@ interface PromptPanelProps {
   mode: Exclude<StudioTab, 'creations'>;
   language: LanguageCode;
   onLanguageChange: (code: LanguageCode) => void;
+  voiceLanguageId: string;
+  onVoiceLanguageChange: (id: string) => void;
   strings: UIStrings;
   prompt: string;
   onPromptChange: (value: string) => void;
@@ -65,15 +72,6 @@ interface PromptPanelProps {
   isGenerating: boolean;
   onGenerate: () => void;
 }
-
-const VOICE_INPUT_LANGUAGES = [
-  { code: 'en-US', label: 'EN', fullName: 'English' },
-  { code: 'ur-PK', label: 'اردو', fullName: 'Urdu' },
-  { code: 'pa-IN', label: 'ਪੰਜਾਬੀ', fullName: 'Punjabi' },
-  { code: 'hi-IN', label: 'हिन्दी', fullName: 'Hindi' },
-] as const;
-
-type VoiceLocaleCode = (typeof VOICE_INPUT_LANGUAGES)[number]['code'];
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -126,6 +124,8 @@ export function PromptPanel({
   mode,
   language,
   onLanguageChange,
+  voiceLanguageId,
+  onVoiceLanguageChange,
   strings,
   prompt,
   onPromptChange,
@@ -164,9 +164,9 @@ export function PromptPanel({
   promptRef.current = prompt;
 
   const [isDragging, setIsDragging] = useState(false);
-  const [voiceLang, setVoiceLang] = useState<VoiceLocaleCode>('en-US');
   const [isListening, setIsListening] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
+  const [voiceStatusNote, setVoiceStatusNote] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
@@ -175,11 +175,14 @@ export function PromptPanel({
   }>({ checking: false });
 
   useEffect(() => {
-    if (language === 'ur') setVoiceLang('ur-PK');
-    else if (language === 'pa') setVoiceLang('pa-IN');
-    else if (language === 'hi') setVoiceLang('hi-IN');
-    else if (language === 'en') setVoiceLang('en-US');
-  }, [language]);
+    if (language === 'ur') onVoiceLanguageChange('ur');
+    else if (language === 'pa') onVoiceLanguageChange('pa');
+    else if (language === 'hi') onVoiceLanguageChange('hi');
+    else if (language === 'ar') onVoiceLanguageChange('ar');
+    else if (language === 'ru') onVoiceLanguageChange('ru');
+    else if (language === 'zh') onVoiceLanguageChange('zh');
+    else if (language === 'en') onVoiceLanguageChange('en');
+  }, [language, onVoiceLanguageChange]);
 
   useEffect(() => {
     return () => {
@@ -193,41 +196,39 @@ export function PromptPanel({
     };
   }, []);
 
-  const toggleVoiceInput = () => {
-    setVoiceError(null);
-    if (isListening && recognitionRef.current) {
-      try {
-        recognitionRef.current.stop();
-      } catch {
-        // Ignore stop errors
-      }
+  const activeVoiceLang = getVoiceLanguageById(voiceLanguageId);
+  const isMoreLanguageSelected = !activeVoiceLang.isQuickPill;
+
+  const startRecognitionWithCodes = (
+    SpeechRecCtor: new () => SpeechRecognitionInstanceLike,
+    codeQueue: string[],
+    queueIndex: number
+  ) => {
+    const activeCode = codeQueue[queueIndex];
+    if (!activeCode) {
+      setVoiceError(`Speech recognition is unavailable for ${activeVoiceLang.englishName} on this browser.`);
       setIsListening(false);
-      setInterimTranscript('');
       return;
     }
 
-    const SpeechRecCtor = (
-      window as unknown as {
-        SpeechRecognition?: new () => SpeechRecognitionInstanceLike;
-        webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
-      }
-    ).SpeechRecognition ||
-      (
-        window as unknown as {
-          webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
-        }
-      ).webkitSpeechRecognition;
-
-    if (!SpeechRecCtor) {
-      setVoiceError('Voice input requires Chrome, Edge, or Safari SpeechRecognition support.');
-      return;
-    }
-
+    let retryingFallback = false;
     try {
       const recognition = new SpeechRecCtor();
-      recognition.lang = voiceLang;
+      recognition.lang = activeCode;
       recognition.continuous = true;
       recognition.interimResults = true;
+
+      if (queueIndex > 0) {
+        setVoiceStatusNote(
+          `Listening with ${activeCode} speech engine for ${activeVoiceLang.nativeLabel}`
+        );
+      } else {
+        setVoiceStatusNote(
+          activeVoiceLang.id !== 'en'
+            ? `Speak in ${activeVoiceLang.englishName} — auto-translates to English for AI scenes`
+            : null
+        );
+      }
 
       recognition.onresult = (event) => {
         let finalChunk = '';
@@ -250,6 +251,16 @@ export function PromptPanel({
       };
 
       recognition.onerror = (event) => {
+        if (event.error === 'language-not-supported' && queueIndex + 1 < codeQueue.length) {
+          retryingFallback = true;
+          try {
+            recognition.stop();
+          } catch {
+            // Ignore stop error before fallback retry
+          }
+          startRecognitionWithCodes(SpeechRecCtor, codeQueue, queueIndex + 1);
+          return;
+        }
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
           setVoiceError('Microphone access denied. Please allow microphone permission.');
         } else if (event.error !== 'aborted' && event.error !== 'no-speech') {
@@ -260,6 +271,7 @@ export function PromptPanel({
       };
 
       recognition.onend = () => {
+        if (retryingFallback) return;
         setIsListening(false);
         setInterimTranscript('');
         recognitionRef.current = null;
@@ -269,9 +281,49 @@ export function PromptPanel({
       recognition.start();
       setIsListening(true);
     } catch {
-      setVoiceError('Could not start voice recognition on this device.');
-      setIsListening(false);
+      if (queueIndex + 1 < codeQueue.length) {
+        startRecognitionWithCodes(SpeechRecCtor, codeQueue, queueIndex + 1);
+      } else {
+        setVoiceError('Could not start voice recognition on this device.');
+        setIsListening(false);
+      }
     }
+  };
+
+  const toggleVoiceInput = () => {
+    setVoiceError(null);
+    setVoiceStatusNote(null);
+    if (isListening && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      setIsListening(false);
+      setInterimTranscript('');
+      return;
+    }
+
+    const SpeechRecCtor =
+      (
+        window as unknown as {
+          SpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+          webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+        }
+      ).SpeechRecognition ||
+      (
+        window as unknown as {
+          webkitSpeechRecognition?: new () => SpeechRecognitionInstanceLike;
+        }
+      ).webkitSpeechRecognition;
+
+    if (!SpeechRecCtor) {
+      setVoiceError('Voice input requires Chrome, Edge, or Safari SpeechRecognition support.');
+      return;
+    }
+
+    const codeQueue = [activeVoiceLang.speechCode, ...activeVoiceLang.fallbackCodes];
+    startRecognitionWithCodes(SpeechRecCtor, codeQueue, 0);
   };
 
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video';
@@ -542,58 +594,93 @@ export function PromptPanel({
             className="w-full resize-y rounded-t-xl bg-transparent px-4 pt-3 pb-2 text-sm leading-relaxed text-slate-100 placeholder:text-slate-500 focus:outline-none"
           />
 
-          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/[0.06] px-3 py-2">
-            <div className="flex items-center gap-1" role="group" aria-label="Voice input language">
-              {VOICE_INPUT_LANGUAGES.map((vLang) => {
-                const selected = voiceLang === vLang.code;
+          <div className="flex flex-col gap-2 border-t border-white/[0.06] px-3 py-2.5">
+            <div className="flex flex-wrap items-center gap-1" role="group" aria-label="Voice input languages">
+              {QUICK_VOICE_LANGUAGES.map((vLang) => {
+                const selected = voiceLanguageId === vLang.id;
                 return (
                   <button
-                    key={vLang.code}
+                    key={vLang.id}
                     type="button"
-                    onClick={() => setVoiceLang(vLang.code)}
-                    title={`Speak in ${vLang.fullName}`}
-                    className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+                    onClick={() => onVoiceLanguageChange(vLang.id)}
+                    title={`${vLang.englishName} (${vLang.speechCode})`}
+                    className={`rounded-md px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
                       selected
-                        ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/40'
-                        : 'text-slate-400 hover:bg-white/[0.05] hover:text-slate-200 border border-transparent'
+                        ? 'bg-cyan-400/20 text-cyan-200 border border-cyan-400/45'
+                        : 'text-slate-300 hover:bg-white/[0.06] hover:text-white border border-white/[0.06]'
                     }`}
                   >
-                    {vLang.label}
+                    {vLang.nativeLabel}
                   </button>
                 );
               })}
             </div>
 
-            <button
-              type="button"
-              onClick={toggleVoiceInput}
-              aria-pressed={isListening}
-              aria-label={isListening ? 'Stop voice input' : 'Speak prompt with microphone'}
-              className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-semibold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 ${
-                isListening
-                  ? 'border border-rose-400/70 bg-rose-500/20 text-rose-200 shadow-[0_0_20px_rgba(244,63,94,0.45)]'
-                  : 'border border-cyan-400/50 bg-cyan-400/15 text-cyan-200 shadow-[0_0_18px_rgba(34,211,238,0.35)] hover:bg-cyan-400/25 hover:shadow-[0_0_24px_rgba(34,211,238,0.55)]'
-              }`}
-            >
-              {isListening ? (
-                <>
-                  <MicOff className="h-3.5 w-3.5 text-rose-300" />
-                  <span>Listening...</span>
-                </>
-              ) : (
-                <>
-                  <Mic className="h-3.5 w-3.5 text-cyan-300" />
-                  <span>Voice Input</span>
-                </>
-              )}
-            </button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="relative flex items-center">
+                <label htmlFor="voice-more-languages" className="sr-only">
+                  More voice input languages
+                </label>
+                <select
+                  id="voice-more-languages"
+                  value={isMoreLanguageSelected ? voiceLanguageId : ''}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      onVoiceLanguageChange(e.target.value);
+                    }
+                  }}
+                  aria-label="More voice input languages"
+                  className={`min-h-[34px] rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors focus:border-cyan-400 focus:outline-none ${
+                    isMoreLanguageSelected
+                      ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                      : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+                  }`}
+                >
+                  <option value="" disabled>
+                    + More Languages
+                  </option>
+                  {MORE_VOICE_LANGUAGES.map((lang) => (
+                    <option key={lang.id} value={lang.id}>
+                      {lang.nativeLabel} — {lang.englishName}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={toggleVoiceInput}
+                aria-pressed={isListening}
+                aria-label={isListening ? 'Stop voice input' : 'Speak prompt with microphone'}
+                className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 ${
+                  isListening
+                    ? 'border border-rose-400/70 bg-rose-500/20 text-rose-200 shadow-[0_0_20px_rgba(244,63,94,0.45)]'
+                    : 'border border-cyan-400/50 bg-cyan-400/15 text-cyan-200 shadow-[0_0_18px_rgba(34,211,238,0.35)] hover:bg-cyan-400/25 hover:shadow-[0_0_24px_rgba(34,211,238,0.55)]'
+                }`}
+              >
+                {isListening ? (
+                  <>
+                    <MicOff className="h-3.5 w-3.5 text-rose-300" />
+                    <span>Listening ({activeVoiceLang.nativeLabel})...</span>
+                  </>
+                ) : (
+                  <>
+                    <Mic className="h-3.5 w-3.5 text-cyan-300" />
+                    <span>Voice Input ({activeVoiceLang.nativeLabel})</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
-        {(interimTranscript || voiceError) && (
-          <div className="text-xs px-1">
+        {(interimTranscript || voiceStatusNote || voiceError) && (
+          <div className="space-y-0.5 text-xs px-1">
             {interimTranscript && (
               <p className="text-cyan-300/90 italic">Hearing: “{interimTranscript}”</p>
+            )}
+            {voiceStatusNote && !voiceError && (
+              <p className="text-slate-400 text-[11px]">{voiceStatusNote}</p>
             )}
             {voiceError && <p className="text-amber-300">{voiceError}</p>}
           </div>

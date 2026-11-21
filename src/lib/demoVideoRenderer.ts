@@ -1,3 +1,4 @@
+import { translatePromptToEnglish } from './voiceLanguages';
 import {
   buildPollinationsFastKeyframeUrl,
   type AspectRatio,
@@ -18,6 +19,7 @@ interface RenderDemoVideoParams {
   backgroundMusicFile?: File | null;
   voiceoverEnabled?: boolean;
   speechLocale?: string;
+  voiceLanguageId?: string;
   onFrameCanvas?: (sourceCanvas: HTMLCanvasElement) => void;
   onProgress: (
     percent: number,
@@ -283,6 +285,7 @@ export async function renderDemoVideo({
   backgroundMusicFile,
   voiceoverEnabled,
   speechLocale = 'en-US',
+  voiceLanguageId,
   onFrameCanvas,
   onProgress,
 }: RenderDemoVideoParams): Promise<RenderedVideoResult> {
@@ -297,51 +300,57 @@ export async function renderDemoVideo({
     onProgress(8, 'Preparing uploaded image...', totalSeconds);
     const uploaded = await loadImageElement(sourceImageDataUrl, 15000, 16);
     sceneImages.push(uploaded);
-  } else if (isMultiScene15s) {
-    onProgress(6, 'Generating AI Scenes (expanding storyboard)...', totalSeconds);
-    const expanded = await expandPromptToScenes(prompt, style, cameraMotion);
-    sceneDescriptions = expanded;
-    const baseSeed = Date.now();
-
-    // Fetch Scene 1 (must succeed via Pollinations with up to 3 retries)
-    onProgress(12, 'Generating AI Scene 1 of 3...', totalSeconds);
-    const scene1 = await fetchPollinationsImageWithRetries(
-      expanded[0],
-      aspectRatio,
-      style,
-      baseSeed,
-      (msg) => onProgress(12, msg, totalSeconds)
-    );
-    sceneImages.push(scene1);
-
-    // Attempt Scene 2 & Scene 3 cleanly; if Pollinations rate-limits mid-sequence, reuse Scene 1 with distinct framing
-    for (let idx = 1; idx < 3; idx += 1) {
-      const pct = 18 + idx * 8;
-      onProgress(pct, `Generating AI Scene ${idx + 1} of 3...`, totalSeconds);
-      try {
-        const nextScene = await fetchPollinationsImageWithRetries(
-          expanded[idx],
-          aspectRatio,
-          style,
-          baseSeed + idx * 149,
-          (msg) => onProgress(pct, msg, totalSeconds)
-        );
-        sceneImages.push(nextScene);
-      } catch {
-        // Keep using real AI Scene 1 image rather than ever rendering fake hills
-        sceneImages.push(scene1);
-      }
-    }
   } else {
-    onProgress(10, 'Generating AI Scene...', totalSeconds);
-    const mainScene = await fetchPollinationsImageWithRetries(
-      prompt,
-      aspectRatio,
-      style,
-      Date.now(),
-      (msg) => onProgress(12, msg, totalSeconds)
-    );
-    sceneImages.push(mainScene);
+    onProgress(5, 'Preparing AI visual prompt...', totalSeconds);
+    const { englishPrompt } = await translatePromptToEnglish(prompt, voiceLanguageId);
+    const visualPrompt = englishPrompt || prompt;
+
+    if (isMultiScene15s) {
+      onProgress(8, 'Generating AI Scenes (expanding storyboard)...', totalSeconds);
+      const expanded = await expandPromptToScenes(visualPrompt, style, cameraMotion);
+      sceneDescriptions = expanded;
+      const baseSeed = Date.now();
+
+      // Fetch Scene 1 (must succeed via Pollinations with up to 3 retries)
+      onProgress(12, 'Generating AI Scene 1 of 3...', totalSeconds);
+      const scene1 = await fetchPollinationsImageWithRetries(
+        expanded[0],
+        aspectRatio,
+        style,
+        baseSeed,
+        (msg) => onProgress(12, msg, totalSeconds)
+      );
+      sceneImages.push(scene1);
+
+      // Attempt Scene 2 & Scene 3 cleanly; if Pollinations rate-limits mid-sequence, reuse Scene 1 with distinct framing
+      for (let idx = 1; idx < 3; idx += 1) {
+        const pct = 18 + idx * 8;
+        onProgress(pct, `Generating AI Scene ${idx + 1} of 3...`, totalSeconds);
+        try {
+          const nextScene = await fetchPollinationsImageWithRetries(
+            expanded[idx],
+            aspectRatio,
+            style,
+            baseSeed + idx * 149,
+            (msg) => onProgress(pct, msg, totalSeconds)
+          );
+          sceneImages.push(nextScene);
+        } catch {
+          // Keep using real AI Scene 1 image rather than ever rendering fake hills
+          sceneImages.push(scene1);
+        }
+      }
+    } else {
+      onProgress(10, 'Generating AI Scene...', totalSeconds);
+      const mainScene = await fetchPollinationsImageWithRetries(
+        visualPrompt,
+        aspectRatio,
+        style,
+        Date.now(),
+        (msg) => onProgress(12, msg, totalSeconds)
+      );
+      sceneImages.push(mainScene);
+    }
   }
 
   const startPercent = isMultiScene15s ? 35 : 22;
