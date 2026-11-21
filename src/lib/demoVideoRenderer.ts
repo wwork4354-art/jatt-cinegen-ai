@@ -174,12 +174,43 @@ function drawKenBurnsImage(
   ctx.restore();
 }
 
-function createCachedVignetteCanvas(width: number, height: number): HTMLCanvasElement {
+function createCachedGradeAndVignetteCanvas(
+  width: number,
+  height: number,
+  style: StylePresetId
+): HTMLCanvasElement {
   const vCanvas = document.createElement('canvas');
   vCanvas.width = width;
   vCanvas.height = height;
   const vctx = vCanvas.getContext('2d');
   if (vctx) {
+    // Style-matched cinematic color grading pass
+    const grade = vctx.createLinearGradient(0, 0, width, height);
+    if (style === 'cinematic') {
+      grade.addColorStop(0, 'rgba(6, 78, 99, 0.14)');
+      grade.addColorStop(0.55, 'rgba(0, 0, 0, 0)');
+      grade.addColorStop(1, 'rgba(180, 83, 9, 0.14)');
+    } else if (style === 'anime') {
+      grade.addColorStop(0, 'rgba(37, 99, 235, 0.12)');
+      grade.addColorStop(1, 'rgba(236, 72, 153, 0.1)');
+    } else if (style === '3d-render') {
+      grade.addColorStop(0, 'rgba(14, 116, 144, 0.12)');
+      grade.addColorStop(1, 'rgba(79, 70, 229, 0.1)');
+    } else {
+      grade.addColorStop(0, 'rgba(15, 23, 42, 0.08)');
+      grade.addColorStop(1, 'rgba(217, 119, 6, 0.06)');
+    }
+    vctx.fillStyle = grade;
+    vctx.fillRect(0, 0, width, height);
+
+    // Subtle diagonal volumetric light ray wash from top-right
+    const ray = vctx.createLinearGradient(width * 0.85, 0, width * 0.25, height);
+    ray.addColorStop(0, 'rgba(255, 245, 220, 0.09)');
+    ray.addColorStop(0.5, 'rgba(34, 211, 238, 0.03)');
+    ray.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    vctx.fillStyle = ray;
+    vctx.fillRect(0, 0, width, height);
+
     const vignette = vctx.createRadialGradient(
       width / 2,
       height / 2,
@@ -189,7 +220,7 @@ function createCachedVignetteCanvas(width: number, height: number): HTMLCanvasEl
       width * 0.78
     );
     vignette.addColorStop(0, 'rgba(0,0,0,0)');
-    vignette.addColorStop(1, 'rgba(4,6,11,0.34)');
+    vignette.addColorStop(1, 'rgba(4,6,11,0.36)');
     vctx.fillStyle = vignette;
     vctx.fillRect(0, 0, width, height);
   }
@@ -223,7 +254,7 @@ export async function renderDemoVideo({
     const uploaded = await loadImageElement(sourceImageDataUrl, 10000, 16);
     sceneImages.push(uploaded);
   } else {
-    onProgress(10, 'Preparing fast AI keyframes...', totalSeconds);
+    onProgress(10, 'Generating real AI scenes (15s timeout)...', totalSeconds);
     // Race translation with a strict 2.5s timeout so prompt prep never stalls
     const translated = await Promise.race([
       translatePromptToEnglish(prompt, voiceLanguageId),
@@ -236,6 +267,7 @@ export async function renderDemoVideo({
     sceneDescriptions = fastScenes;
 
     const [k1, k2] = await fetchFastVideoKeyframesParallel({
+      basePrompt: visualPrompt,
       scenePrompts: fastScenes,
       aspectRatio,
       style,
@@ -262,10 +294,10 @@ export async function renderDemoVideo({
     throw new Error('Your browser does not support MediaRecorder video encoding.');
   }
 
-  // Fast 30fps capture stream with cached static vignette overlay for 3GB RAM efficiency
+  // Fast 30fps capture stream with cached color-grade + volumetric + vignette overlay
   const fps = 30;
   const frameIntervalMs = 1000 / fps;
-  const cachedVignette = createCachedVignetteCanvas(width, height);
+  const cachedVignette = createCachedGradeAndVignetteCanvas(width, height, style);
   const videoStream = canvas.captureStream(fps);
   const combinedTracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
 

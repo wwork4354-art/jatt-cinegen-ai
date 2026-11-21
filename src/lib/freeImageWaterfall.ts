@@ -1,5 +1,5 @@
 import { STYLE_PROMPT_SUFFIX, type AspectRatio, type StylePresetId } from '../types/studio';
-import { generateProceduralSceneImage } from './proceduralSceneCanvas';
+import { getCuratedHdPhotoUrls, searchWikimediaCommonsPhotos } from './realPhotoFallback';
 
 export interface FetchedAiImageResult {
   img: HTMLImageElement;
@@ -52,7 +52,7 @@ function loadImageFromObjectUrl(url: string, timeoutMs = 15000): Promise<HTMLIma
   });
 }
 
-function loadImageDirectCrossOrigin(url: string, timeoutMs = 18000): Promise<HTMLImageElement> {
+function loadImageDirectCrossOrigin(url: string, timeoutMs = 15000): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -78,12 +78,12 @@ function isRateLimitOrRefusedBanner(
   expectedHeight: number,
   strictDimensionCheck: boolean
 ): string | null {
-  if (img.naturalWidth < 200 || img.naturalHeight < 200) {
+  if (img.naturalWidth < 250 || img.naturalHeight < 250) {
     return 'Image dimensions too small';
   }
 
   // Known Pollinations "Free limit reached" / "Image refused" square banner signature
-  if (img.naturalWidth === 1024 && img.naturalHeight === 1024) {
+  if (strictDimensionCheck && img.naturalWidth === 1024 && img.naturalHeight === 1024) {
     return 'Detected 1024x1024 error/refusal placeholder image';
   }
 
@@ -118,13 +118,13 @@ function isRateLimitOrRefusedBanner(
       const g = data[i + 1];
       const b = data[i + 2];
 
-      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) < 20) {
+      if (Math.abs(r - bgR) + Math.abs(g - bgG) + Math.abs(b - bgB) < 18) {
         uniformBgPixels += 1;
       }
 
       const maxC = Math.max(r, g, b);
       const minC = Math.min(r, g, b);
-      if (maxC - minC < 18) {
+      if (maxC - minC < 16) {
         monochromePixels += 1;
       }
     }
@@ -135,7 +135,7 @@ function isRateLimitOrRefusedBanner(
       return 'Detected solid-background text/error banner';
     }
   } catch {
-    // Ignore canvas read errors if image came without CORS pixel access
+    // Ignore canvas read errors if image came without pixel access
   }
 
   return null;
@@ -147,8 +147,8 @@ async function fetchAndValidateImageUrl(
   expectedHeight: number,
   strictDimensionCheck: boolean,
   providerLabel: string,
-  timeoutMs = 20000
-): Promise<{ result: FetchedAiImageResult; retryAfterSec?: number }> {
+  timeoutMs = 15000
+): Promise<FetchedAiImageResult> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
 
@@ -160,9 +160,8 @@ async function fetchAndValidateImageUrl(
       referrerPolicy: 'no-referrer',
       signal: controller.signal,
     });
-  } catch (err) {
+  } catch {
     window.clearTimeout(timer);
-    // If browser CORS blocks fetch on a backup endpoint, fall back to direct CORS <img> probe
     const directImg = await loadImageDirectCrossOrigin(url, timeoutMs);
     const reason = isRateLimitOrRefusedBanner(
       directImg,
@@ -183,20 +182,15 @@ async function fetchAndValidateImageUrl(
     );
     const objectUrl = URL.createObjectURL(blob);
     return {
-      result: {
-        img: directImg,
-        blob,
-        objectUrl,
-        providerLabel,
-        width: directImg.naturalWidth,
-        height: directImg.naturalHeight,
-      },
+      img: directImg,
+      blob,
+      objectUrl,
+      providerLabel,
+      width: directImg.naturalWidth,
+      height: directImg.naturalHeight,
     };
   }
   window.clearTimeout(timer);
-
-  const retryAfterHeader = response.headers.get('retry-after');
-  const retryAfterSec = retryAfterHeader ? Number(retryAfterHeader) : undefined;
 
   if (
     response.status === 402 ||
@@ -205,11 +199,7 @@ async function fetchAndValidateImageUrl(
     response.status >= 500 ||
     !response.ok
   ) {
-    const err = new Error(`${providerLabel} returned HTTP ${response.status}`) as Error & {
-      retryAfterSec?: number;
-    };
-    err.retryAfterSec = Number.isFinite(retryAfterSec) ? retryAfterSec : undefined;
-    throw err;
+    throw new Error(`${providerLabel} returned HTTP ${response.status}`);
   }
 
   const contentType = response.headers.get('content-type') || '';
@@ -235,14 +225,12 @@ async function fetchAndValidateImageUrl(
       throw new Error(`${providerLabel}: ${bannerReason}`);
     }
     return {
-      result: {
-        img,
-        blob,
-        objectUrl,
-        providerLabel,
-        width: img.naturalWidth,
-        height: img.naturalHeight,
-      },
+      img,
+      blob,
+      objectUrl,
+      providerLabel,
+      width: img.naturalWidth,
+      height: img.naturalHeight,
     };
   } catch (err) {
     URL.revokeObjectURL(objectUrl);
@@ -250,89 +238,41 @@ async function fetchAndValidateImageUrl(
   }
 }
 
-async function fetchFromAiHordeFallback(
-  cleanPrompt: string,
-  fetchWidth: number,
-  fetchHeight: number,
+async function fetchRealPhotoFallbackList(
+  prompt: string,
+  aspectRatio: AspectRatio,
+  count: number,
   onStatus?: (msg: string) => void
-): Promise<FetchedAiImageResult> {
-  // AI Horde requires width & height to be multiples of 64
-  const hordeW = Math.max(512, Math.round(fetchWidth / 64) * 64);
-  const hordeH = Math.max(512, Math.round(fetchHeight / 64) * 64);
+): Promise<FetchedAiImageResult[]> {
+  const { fetchWidth, fetchHeight } = getWaterfallDimensions(aspectRatio);
+  const results: FetchedAiImageResult[] = [];
 
-  onStatus?.('Switching to Backup Free AI Cluster (AI Horde)...');
-  const submitRes = await fetch('https://aihorde.net/api/v2/generate/async', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      apikey: '0000000000',
-      'Client-Agent': 'JattCineGenAI:1.0:free',
-    },
-    body: JSON.stringify({
-      prompt: cleanPrompt,
-      params: {
-        width: hordeW,
-        height: hordeH,
-        steps: 20,
-        n: 1,
-        sampler_name: 'k_euler_a',
-      },
-      nsfw: false,
-      censor_nsfw: true,
-      r2: true,
-    }),
-  });
+  onStatus?.('Searching real HD photography matching prompt keywords...');
+  const wikiUrls = await searchWikimediaCommonsPhotos(prompt, 8);
+  const curatedUrls = getCuratedHdPhotoUrls(prompt, aspectRatio);
+  const candidatePool = [...wikiUrls, ...curatedUrls];
 
-  if (!submitRes.ok) {
-    throw new Error(`AI Horde submit failed (HTTP ${submitRes.status})`);
-  }
-
-  const submitData = (await submitRes.json()) as { id?: string };
-  if (!submitData.id) {
-    throw new Error('AI Horde did not return a job ID');
-  }
-
-  const deadline = Date.now() + 26000;
-  while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 2500));
-    const checkRes = await fetch(`https://aihorde.net/api/v2/generate/check/${submitData.id}`);
-    if (!checkRes.ok) continue;
-    const checkData = (await checkRes.json()) as {
-      done?: boolean;
-      faulted?: boolean;
-      wait_time?: number;
-    };
-    if (checkData.faulted) {
-      throw new Error('AI Horde generation faulted');
-    }
-    if (checkData.wait_time && checkData.wait_time > 0) {
-      onStatus?.(`Backup Free AI Cluster rendering (~${Math.min(25, checkData.wait_time)}s)...`);
-    }
-    if (checkData.done) {
-      const statusRes = await fetch(`https://aihorde.net/api/v2/generate/status/${submitData.id}`);
-      if (!statusRes.ok) {
-        throw new Error(`AI Horde status failed (HTTP ${statusRes.status})`);
-      }
-      const statusData = (await statusRes.json()) as {
-        generations?: Array<{ img?: string }>;
-      };
-      const imgUrl = statusData.generations?.[0]?.img;
-      if (!imgUrl) {
-        throw new Error('AI Horde returned no image URL');
-      }
+  for (const photoUrl of candidatePool) {
+    if (results.length >= count) break;
+    try {
+      const label = photoUrl.includes('wikimedia.org')
+        ? 'Wikimedia Commons HD Photo'
+        : 'Curated HD Photo';
       const fetched = await fetchAndValidateImageUrl(
-        imgUrl,
-        hordeW,
-        hordeH,
+        photoUrl,
+        fetchWidth,
+        fetchHeight,
         false,
-        'AI Horde Free Cluster',
-        20000
+        label,
+        10000
       );
-      return fetched.result;
+      results.push(fetched);
+    } catch {
+      // Try next photo candidate
     }
   }
 
-  throw new Error('AI Horde generation timed out');
+  return results;
 }
 
 export async function fetchFreeAiImageWithWaterfall(params: {
@@ -352,190 +292,158 @@ export async function fetchFreeAiImageWithWaterfall(params: {
   );
   const encodedPrompt = encodeURIComponent(cleanPrompt);
 
-  const primaryFluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux&width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&seed=${randomSeed}`;
-  const backupTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=turbo&width=${fetchWidth}&height=${fetchHeight}&nologo=true&seed=${randomSeed + 99}`;
-  const backupAirforceUrl = `https://api.airforce/imagine2?model=flux&prompt=${encodedPrompt}`;
+  const primaryFluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&model=flux&seed=${randomSeed}`;
+  const backupTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=turbo&seed=${randomSeed + 99}`;
+  const retryFluxUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+    sanitizeSafePrompt(prompt)
+  )}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=flux&seed=${randomSeed + 777}`;
 
-  const providers: Array<{
-    label: string;
-    url: string;
-    strictDimensionCheck: boolean;
-  }> = [
-    { label: 'Pollinations Flux', url: primaryFluxUrl, strictDimensionCheck: true },
-    { label: 'Pollinations Turbo', url: backupTurboUrl, strictDimensionCheck: true },
-    { label: 'Airforce Flux Backup', url: backupAirforceUrl, strictDimensionCheck: false },
+  const providers: Array<{ label: string; url: string }> = [
+    { label: 'Pollinations Flux AI', url: primaryFluxUrl },
+    { label: 'Pollinations Turbo AI', url: backupTurboUrl },
+    { label: 'Pollinations Flux (Alt Seed)', url: retryFluxUrl },
   ];
-
-  let suggestedWaitSec = 0;
 
   for (const provider of providers) {
     try {
-      onStatus?.(`Generating AI visual via ${provider.label}...`);
-      const { result } = await fetchAndValidateImageUrl(
+      onStatus?.(`Generating real AI image via ${provider.label}...`);
+      return await fetchAndValidateImageUrl(
         provider.url,
         fetchWidth,
         fetchHeight,
-        provider.strictDimensionCheck,
+        true,
         provider.label,
-        18000
+        15000
       );
-      return result;
-    } catch (err) {
-      const retrySec = (err as { retryAfterSec?: number }).retryAfterSec;
-      if (retrySec && retrySec > suggestedWaitSec) {
-        suggestedWaitSec = retrySec;
-      }
-      onStatus?.(`${provider.label} unavailable — switching to backup provider...`);
+    } catch {
+      onStatus?.(`${provider.label} busy — switching model/seed...`);
     }
   }
 
-  // Backup 3: Free keyless AI Horde distributed cluster
-  try {
-    return await fetchFromAiHordeFallback(cleanPrompt, fetchWidth, fetchHeight, onStatus);
-  } catch {
-    // If AI Horde also timed out and Pollinations suggested a brief retry window, wait & retry with randomized seed
-    if (suggestedWaitSec > 0 && suggestedWaitSec <= 20) {
-      const waitMs = Math.min(18000, (suggestedWaitSec + 1) * 1000);
-      onStatus?.(`Cooling down ${Math.ceil(waitMs / 1000)}s and retrying with fresh seed...`);
-      await new Promise((r) => setTimeout(r, waitMs));
-      const retrySeed = Math.floor(100000 + Math.random() * 8999999);
-      const retryUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?model=flux&width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&seed=${retrySeed}`;
-      const { result } = await fetchAndValidateImageUrl(
-        retryUrl,
-        fetchWidth,
-        fetchHeight,
-        true,
-        'Pollinations Flux (Retry)',
-        20000
-      );
-      return result;
-    }
+  // Real HD Photographic Fallback (Wikimedia Commons + Verified Unsplash HD Photography)
+  const photos = await fetchRealPhotoFallbackList(prompt, aspectRatio, 1, onStatus);
+  if (photos.length > 0) {
+    return photos[0];
   }
 
   throw new Error(
-    'Free AI image providers are temporarily busy. Please wait a few seconds and click Generate again.'
+    'Could not load an AI image or fallback photograph right now. Please check your connection and try again.'
   );
-}
-
-export function getFastVideoDimensions(aspectRatio: AspectRatio): {
-  fetchWidth: number;
-  fetchHeight: number;
-} {
-  if (aspectRatio === '9:16') {
-    return { fetchWidth: 432, fetchHeight: 768 };
-  }
-  if (aspectRatio === '1:1') {
-    return { fetchWidth: 512, fetchHeight: 512 };
-  }
-  return { fetchWidth: 768, fetchHeight: 432 };
 }
 
 export interface FastKeyframeResult {
   img: HTMLImageElement;
   objectUrl: string;
-  isProcedural: boolean;
+  isAiGenerated: boolean;
 }
 
-async function fetchSingleFastKeyframe(params: {
+async function tryPollinationsKeyframe(params: {
   scenePrompt: string;
   aspectRatio: AspectRatio;
   style: StylePresetId;
   seed: number;
-  sceneIndex: number;
-}): Promise<FastKeyframeResult> {
-  const { scenePrompt, aspectRatio, style, seed, sceneIndex } = params;
-  const { fetchWidth, fetchHeight } = getFastVideoDimensions(aspectRatio);
+  preferTurboFirst?: boolean;
+}): Promise<FastKeyframeResult | null> {
+  const { scenePrompt, aspectRatio, style, seed, preferTurboFirst } = params;
+  const { fetchWidth, fetchHeight } = getWaterfallDimensions(aspectRatio);
   const styleSuffix = STYLE_PROMPT_SUFFIX[style] ?? '';
   const cleanPrompt = sanitizeSafePrompt(
     styleSuffix ? `${scenePrompt}, ${styleSuffix}` : scenePrompt
   );
   const encodedPrompt = encodeURIComponent(cleanPrompt);
 
-  const deadline = Date.now() + 6000;
+  const fluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&model=flux&seed=${seed}`;
+  const turboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=turbo&seed=${seed + 99}`;
 
-  const fastTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&model=turbo&nologo=true&seed=${seed}`;
-  const backupAirforceUrl = `https://api.airforce/imagine2?model=flux&prompt=${encodedPrompt}`;
+  const order = preferTurboFirst
+    ? [
+        { url: turboUrl, label: 'Pollinations Turbo AI' },
+        { url: fluxUrl, label: 'Pollinations Flux AI' },
+      ]
+    : [
+        { url: fluxUrl, label: 'Pollinations Flux AI' },
+        { url: turboUrl, label: 'Pollinations Turbo AI' },
+      ];
 
-  const candidates = [
-    { url: fastTurboUrl, label: 'Pollinations Turbo', strict: true },
-    { url: backupAirforceUrl, label: 'Airforce Flux', strict: false },
-  ];
-
-  for (const candidate of candidates) {
-    const remainingMs = deadline - Date.now();
-    if (remainingMs < 900) break;
-
+  for (const attempt of order) {
     try {
-      const { result } = await fetchAndValidateImageUrl(
-        candidate.url,
+      const result = await fetchAndValidateImageUrl(
+        attempt.url,
         fetchWidth,
         fetchHeight,
-        candidate.strict,
-        candidate.label,
-        remainingMs
+        true,
+        attempt.label,
+        15000
       );
       return {
         img: result.img,
         objectUrl: result.objectUrl,
-        isProcedural: false,
+        isAiGenerated: true,
       };
     } catch {
-      // Immediately move to next backup or procedural fallback within 6s budget
+      // Try next model
     }
   }
 
-  // Instant Procedural Cinematic Canvas Fallback (under 40ms, zero hanging)
-  const proc = await generateProceduralSceneImage({
-    prompt: scenePrompt,
-    aspectRatio,
-    style,
-    sceneIndex,
-  });
-  return {
-    img: proc.img,
-    objectUrl: proc.objectUrl,
-    isProcedural: true,
-  };
+  return null;
 }
 
 export async function fetchFastVideoKeyframesParallel(params: {
+  basePrompt: string;
   scenePrompts: [string, string];
   aspectRatio: AspectRatio;
   style: StylePresetId;
   onStatus?: (msg: string) => void;
 }): Promise<[FastKeyframeResult, FastKeyframeResult]> {
-  const { scenePrompts, aspectRatio, style, onStatus } = params;
+  const { basePrompt, scenePrompts, aspectRatio, style, onStatus } = params;
   const baseSeed = Math.floor(100000 + Math.random() * 8999999);
 
-  onStatus?.('Fetching 2 parallel keyframes (6s fast timeout)...');
+  onStatus?.('Generating real AI scenes (15s multi-model timeout)...');
 
-  const [k1, k2] = await Promise.all([
-    fetchSingleFastKeyframe({
+  const [ai1, ai2] = await Promise.all([
+    tryPollinationsKeyframe({
       scenePrompt: scenePrompts[0],
       aspectRatio,
       style,
       seed: baseSeed,
-      sceneIndex: 0,
+      preferTurboFirst: false,
     }),
-    fetchSingleFastKeyframe({
+    tryPollinationsKeyframe({
       scenePrompt: scenePrompts[1],
       aspectRatio,
       style,
-      seed: baseSeed + 99,
-      sceneIndex: 1,
+      seed: baseSeed + 137,
+      preferTurboFirst: true,
     }),
   ]);
 
-  // If Keyframe 1 got a real AI image and Keyframe 2 fell back to procedural due to 45s IP limit,
-  // share the real AI image for seamless photorealistic continuity.
-  if (!k1.isProcedural && k2.isProcedural) {
-    URL.revokeObjectURL(k2.objectUrl);
-    return [k1, { img: k1.img, objectUrl: k1.objectUrl, isProcedural: false }];
+  if (ai1 && ai2) {
+    return [ai1, ai2];
   }
-  if (k1.isProcedural && !k2.isProcedural) {
-    URL.revokeObjectURL(k1.objectUrl);
-    return [{ img: k2.img, objectUrl: k2.objectUrl, isProcedural: false }, k2];
+  if (ai1 && !ai2) {
+    return [ai1, { img: ai1.img, objectUrl: ai1.objectUrl, isAiGenerated: true }];
+  }
+  if (!ai1 && ai2) {
+    return [{ img: ai2.img, objectUrl: ai2.objectUrl, isAiGenerated: true }, ai2];
   }
 
-  return [k1, k2];
+  // Real HD Photographic Fallback (Zero Cartoon Line-Art): Wikimedia Commons + Curated HD Photos
+  onStatus?.('AI queue busy — loading real HD photography matching your prompt...');
+  const photos = await fetchRealPhotoFallbackList(basePrompt, aspectRatio, 2, onStatus);
+  if (photos.length >= 2) {
+    return [
+      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
+      { img: photos[1].img, objectUrl: photos[1].objectUrl, isAiGenerated: false },
+    ];
+  }
+  if (photos.length === 1) {
+    return [
+      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
+      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
+    ];
+  }
+
+  throw new Error(
+    'Unable to load AI scenes or HD photography right now. Please check your internet connection and try again.'
+  );
 }

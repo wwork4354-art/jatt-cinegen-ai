@@ -831,7 +831,7 @@ export function PromptPanel({
             </div>
             {mode === 'text-to-video' && duration === '15s' && (
               <p className="text-[11px] leading-snug text-cyan-300/80">
-                Fetches 2 keyframes in parallel (6s max) and renders a smooth 15s 30fps video.
+                Generates real AI scenes (with HD photographic backup) and renders a 15s 30fps video.
               </p>
             )}
           </div>
