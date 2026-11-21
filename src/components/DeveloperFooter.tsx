@@ -18,6 +18,8 @@ interface DeveloperFooterProps {
   footerCreditLabel: string;
 }
 
+const DEFAULT_AVATAR_URL = '/creator-avatar.png';
+
 function normalizeUrl(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
@@ -119,18 +121,14 @@ export function DeveloperFooter({
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            title="Upload developer avatar photo"
+            title="Click avatar to customize photo"
             className="group relative flex h-11 w-11 shrink-0 items-center justify-center overflow-hidden rounded-full border border-cyan-400/40 bg-cyan-400/10 text-cyan-200 transition-colors hover:border-cyan-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
           >
-            {profile.avatarDataUrl ? (
-              <img
-                src={profile.avatarDataUrl}
-                alt="Jatt Official developer avatar"
-                className="h-full w-full object-cover"
-              />
-            ) : (
-              <span className="font-display text-xs font-bold tracking-tight">JO</span>
-            )}
+            <img
+              src={profile.avatarDataUrl || DEFAULT_AVATAR_URL}
+              alt="Jatt Official developer avatar"
+              className="h-full w-full object-cover"
+            />
             <span className="absolute inset-0 flex items-center justify-center bg-black/60 opacity-0 transition-opacity group-hover:opacity-100">
               <Camera className="h-3.5 w-3.5 text-white" />
             </span>
@@ -234,15 +232,11 @@ export function DeveloperFooter({
 
             <div className="flex items-center gap-4 rounded-xl border border-white/10 bg-[#07090E] p-3.5">
               <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border border-cyan-400/40 bg-cyan-400/10 text-cyan-200">
-                {profile.avatarDataUrl ? (
-                  <img
-                    src={profile.avatarDataUrl}
-                    alt="Developer avatar preview"
-                    className="h-full w-full object-cover"
-                  />
-                ) : (
-                  <span className="font-display text-sm font-bold">JO</span>
-                )}
+                <img
+                  src={profile.avatarDataUrl || DEFAULT_AVATAR_URL}
+                  alt="Developer avatar preview"
+                  className="h-full w-full object-cover"
+                />
               </div>
               <div className="flex flex-1 flex-wrap items-center gap-2">
                 <button
@@ -253,14 +247,14 @@ export function DeveloperFooter({
                   <Camera className="h-3.5 w-3.5" />
                   Upload Avatar Photo
                 </button>
-                {profile.avatarDataUrl && (
+                {profile.avatarDataUrl && profile.avatarDataUrl !== DEFAULT_AVATAR_URL && (
                   <button
                     type="button"
-                    onClick={() => onUpdateProfile({ ...profile, avatarDataUrl: null })}
+                    onClick={() => onUpdateProfile({ ...profile, avatarDataUrl: DEFAULT_AVATAR_URL })}
                     className="inline-flex min-h-[36px] items-center gap-1 rounded-lg border border-white/10 px-2.5 py-1.5 text-xs font-medium text-slate-400 hover:border-rose-400/40 hover:text-rose-300 transition-colors"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
-                    Reset
+                    Reset Default
                   </button>
                 )}
               </div>

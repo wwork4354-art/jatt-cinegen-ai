@@ -8,10 +8,10 @@ import { ShareModal } from './components/ShareModal';
 import { DeveloperFooter } from './components/DeveloperFooter';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
+import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { translatePromptToEnglish } from './lib/voiceLanguages';
 import {
-  buildPollinationsImageUrl,
   type AspectRatio,
   type CameraMotionId,
   type CreationItem,
@@ -27,22 +27,14 @@ import {
 const CUSTOM_BACKEND_STORAGE_KEY = 'vesper_custom_video_backend_url';
 const LANGUAGE_STORAGE_KEY = 'jatt_cinegen_language';
 const DEV_PROFILE_STORAGE_KEY = 'jatt_cinegen_developer_profile';
+const DEFAULT_CREATOR_AVATAR = '/creator-avatar.png';
 
 const DEFAULT_DEV_PROFILE: DeveloperProfile = {
-  avatarDataUrl: null,
+  avatarDataUrl: DEFAULT_CREATOR_AVATAR,
   youtubeUrl: '',
   instagramUrl: '',
   websiteUrl: '',
 };
-
-interface PendingImageJob {
-  url: string;
-  prompt: string;
-  style: StylePresetId;
-  aspectRatio: AspectRatio;
-  width: number;
-  height: number;
-}
 
 async function blobToDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -89,7 +81,12 @@ export default function App() {
     try {
       const saved = localStorage.getItem(DEV_PROFILE_STORAGE_KEY);
       if (saved) {
-        return { ...DEFAULT_DEV_PROFILE, ...(JSON.parse(saved) as Partial<DeveloperProfile>) };
+        const parsed = JSON.parse(saved) as Partial<DeveloperProfile>;
+        return {
+          ...DEFAULT_DEV_PROFILE,
+          ...parsed,
+          avatarDataUrl: parsed.avatarDataUrl || DEFAULT_CREATOR_AVATAR,
+        };
       }
     } catch {
       // Ignore storage parse error
@@ -99,7 +96,6 @@ export default function App() {
 
   const [creations, setCreations] = useState<CreationItem[]>([]);
   const [activeCreationId, setActiveCreationId] = useState<string | null>(null);
-  const [pendingImageJob, setPendingImageJob] = useState<PendingImageJob | null>(null);
   const [isLivePreviewActive, setIsLivePreviewActive] = useState(false);
   const [shareItem, setShareItem] = useState<CreationItem | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -208,48 +204,6 @@ export default function App() {
     setActiveCreationId(item.id);
   }, []);
 
-  const handlePendingImageLoad = useCallback(async () => {
-    if (!pendingImageJob) return;
-    const job = pendingImageJob;
-    setPendingImageJob(null);
-
-    setProgress((p) => ({
-      ...p,
-      percent: 96,
-      statusMessage: 'Saving Full HD asset to My Creations...',
-    }));
-
-    const item: CreationItem = {
-      id: crypto.randomUUID(),
-      kind: 'image',
-      sourceMode: 'text-to-image',
-      prompt: job.prompt,
-      style: job.style,
-      aspectRatio: job.aspectRatio,
-      width: job.width,
-      height: job.height,
-      engineLabel: 'Pollinations Free AI',
-      mediaUrl: job.url,
-      mimeType: 'image/jpeg',
-      createdAt: Date.now(),
-    };
-
-    try {
-      await persistNewCreation(item);
-    } finally {
-      stopTimer();
-      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-    }
-  }, [pendingImageJob, persistNewCreation, stopTimer]);
-
-  const handlePendingImageError = useCallback(() => {
-    if (!pendingImageJob) return;
-    setPendingImageJob(null);
-    stopTimer();
-    setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-    setErrorMessage('Could not load image from Pollinations AI. Please try generating again.');
-  }, [pendingImageJob, stopTimer]);
-
   const handleEnhancePrompt = async () => {
     const trimmed = prompt.trim();
     if (!trimmed || isEnhancing) return;
@@ -293,38 +247,51 @@ export default function App() {
 
     setErrorMessage(null);
 
-    // Direct frontend Pollinations AI <img> generation (with automatic English translation under the hood)
+    // Direct frontend Multi-Provider Free AI Image Waterfall (blocks rate-limit/refusal banners)
     if (activeTab === 'text-to-image') {
-      startTimer('Rendering Full HD image via Pollinations AI...');
-      const { englishPrompt } = await translatePromptToEnglish(trimmedPrompt, voiceLanguageId);
-      const { url, width, height } = buildPollinationsImageUrl(
-        englishPrompt || trimmedPrompt,
-        aspectRatio,
-        stylePreset,
-        Date.now()
-      );
+      startTimer('Preparing AI prompt...');
+      try {
+        const { englishPrompt } = await translatePromptToEnglish(trimmedPrompt, voiceLanguageId);
+        const result = await fetchFreeAiImageWithWaterfall({
+          prompt: englishPrompt || trimmedPrompt,
+          aspectRatio,
+          style: stylePreset,
+          onStatus: (msg) => {
+            setProgress((p) => (p.active ? { ...p, percent: 48, statusMessage: msg } : p));
+          },
+        });
 
-      stageTimersRef.current.push(
-        window.setTimeout(() => {
-          setProgress((p) =>
-            p.active ? { ...p, percent: 42, statusMessage: `Synthesizing ${width}×${height} composition...` } : p
-          );
-        }, 900),
-        window.setTimeout(() => {
-          setProgress((p) =>
-            p.active ? { ...p, percent: 76, statusMessage: 'Refining lighting and Full HD detail...' } : p
-          );
-        }, 2800)
-      );
+        setProgress((p) =>
+          p.active ? { ...p, percent: 94, statusMessage: 'Saving Full HD image to My Creations...' } : p
+        );
 
-      setPendingImageJob({
-        url,
-        prompt: trimmedPrompt,
-        style: stylePreset,
-        aspectRatio,
-        width,
-        height,
-      });
+        const item: CreationItem = {
+          id: crypto.randomUUID(),
+          kind: 'image',
+          sourceMode: 'text-to-image',
+          prompt: trimmedPrompt,
+          style: stylePreset,
+          aspectRatio,
+          width: result.width,
+          height: result.height,
+          engineLabel: result.providerLabel,
+          mediaUrl: result.objectUrl,
+          mimeType: result.blob.type || 'image/jpeg',
+          createdAt: Date.now(),
+          blob: result.blob,
+        };
+
+        await persistNewCreation(item);
+      } catch (err) {
+        setErrorMessage(
+          err instanceof Error
+            ? err.message
+            : 'Could not generate image from free AI providers. Please try again.'
+        );
+      } finally {
+        stopTimer();
+        setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+      }
       return;
     }
 
@@ -607,7 +574,6 @@ export default function App() {
   const handleResetWorkspace = useCallback(() => {
     setPrompt('');
     setPreviousPrompt(null);
-    setPendingImageJob(null);
     stopTimer();
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       window.speechSynthesis.cancel();
@@ -719,10 +685,10 @@ export default function App() {
                 aspectRatio={aspectRatio}
                 progress={progress}
                 activeCreation={activeCreation}
-                pendingImageUrl={pendingImageJob?.url ?? null}
-                pendingImageAlt={pendingImageJob?.prompt ?? ''}
-                onPendingImageLoad={handlePendingImageLoad}
-                onPendingImageError={handlePendingImageError}
+                pendingImageUrl={null}
+                pendingImageAlt=""
+                onPendingImageLoad={() => {}}
+                onPendingImageError={() => {}}
                 liveCanvasRef={liveCanvasRef}
                 isLivePreviewActive={isLivePreviewActive}
                 errorMessage={errorMessage}

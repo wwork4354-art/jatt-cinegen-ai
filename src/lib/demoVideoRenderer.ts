@@ -1,6 +1,6 @@
 import { translatePromptToEnglish } from './voiceLanguages';
+import { fetchFreeAiImageWithWaterfall } from './freeImageWaterfall';
 import {
-  buildPollinationsFastKeyframeUrl,
   type AspectRatio,
   type CameraMotionId,
   type StylePresetId,
@@ -50,7 +50,7 @@ function getDimensions(aspectRatio: AspectRatio, quality: VideoQuality): { width
   return quality === '1080p' ? { width: 1920, height: 1080 } : { width: 1280, height: 720 };
 }
 
-function loadImageElement(src: string, timeoutMs = 15000, minDimension = 200): Promise<HTMLImageElement> {
+function loadImageElement(src: string, timeoutMs = 15000, minDimension = 16): Promise<HTMLImageElement> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
@@ -68,84 +68,10 @@ function loadImageElement(src: string, timeoutMs = 15000, minDimension = 200): P
     };
     img.onerror = () => {
       window.clearTimeout(timer);
-      reject(new Error('Pollinations image request failed'));
+      reject(new Error('Uploaded image failed to load'));
     };
     img.src = src;
   });
-}
-
-function isLikelyRateLimitBanner(img: HTMLImageElement, targetWidth: number, targetHeight: number): boolean {
-  const targetRatio = targetWidth / targetHeight;
-  const actualRatio = img.naturalWidth / Math.max(1, img.naturalHeight);
-  if (Math.abs(targetRatio - actualRatio) > 0.35) {
-    return true;
-  }
-
-  try {
-    const probe = document.createElement('canvas');
-    probe.width = 48;
-    probe.height = 48;
-    const pctx = probe.getContext('2d');
-    if (!pctx) return false;
-    pctx.drawImage(img, 0, 0, 48, 48);
-    const data = pctx.getImageData(0, 0, 48, 48).data;
-    const firstR = data[0];
-    const firstG = data[1];
-    const firstB = data[2];
-    let uniformPixels = 0;
-    const totalPixels = 48 * 48;
-    for (let i = 0; i < data.length; i += 4) {
-      const dr = Math.abs(data[i] - firstR);
-      const dg = Math.abs(data[i + 1] - firstG);
-      const db = Math.abs(data[i + 2] - firstB);
-      if (dr + dg + db < 16) {
-        uniformPixels += 1;
-      }
-    }
-    return uniformPixels / totalPixels > 0.72;
-  } catch {
-    return false;
-  }
-}
-
-async function fetchPollinationsImageWithRetries(
-  scenePrompt: string,
-  aspectRatio: AspectRatio,
-  style: StylePresetId,
-  seed: number,
-  onAttemptStatus: (msg: string) => void
-): Promise<HTMLImageElement> {
-  const maxAttempts = 4;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const { url, fetchWidth, fetchHeight } = buildPollinationsFastKeyframeUrl(
-      scenePrompt,
-      aspectRatio,
-      style,
-      seed + attempt * 31
-    );
-
-    try {
-      const img = await loadImageElement(url, 15000);
-      if (isLikelyRateLimitBanner(img, fetchWidth, fetchHeight)) {
-        throw new Error('Pollinations returned a temporary rate-limit banner');
-      }
-      return img;
-    } catch (err) {
-      if (attempt < maxAttempts) {
-        onAttemptStatus(
-          `Generating AI Scene... (Retry ${attempt}/${maxAttempts - 1} in 4s)`
-        );
-        await new Promise((resolve) => setTimeout(resolve, 4000));
-      } else {
-        throw err instanceof Error
-          ? err
-          : new Error('Unable to load AI scene image from Pollinations.');
-      }
-    }
-  }
-
-  throw new Error('Unable to load AI scene image from Pollinations.');
 }
 
 function buildSequentialScenes(prompt: string): [string, string, string] {
@@ -294,6 +220,7 @@ export async function renderDemoVideo({
   const isMultiScene15s = duration === '15s' && !sourceImageDataUrl;
 
   const sceneImages: HTMLImageElement[] = [];
+  const tempObjectUrls: string[] = [];
   let sceneDescriptions: string[] | undefined;
 
   if (sourceImageDataUrl) {
@@ -309,47 +236,48 @@ export async function renderDemoVideo({
       onProgress(8, 'Generating AI Scenes (expanding storyboard)...', totalSeconds);
       const expanded = await expandPromptToScenes(visualPrompt, style, cameraMotion);
       sceneDescriptions = expanded;
-      const baseSeed = Date.now();
+      const baseSeed = Math.floor(100000 + Math.random() * 8999999);
 
-      // Fetch Scene 1 (must succeed via Pollinations with up to 3 retries)
+      // Fetch Scene 1 via multi-provider waterfall (Pollinations Flux -> Turbo -> Airforce -> AI Horde)
       onProgress(12, 'Generating AI Scene 1 of 3...', totalSeconds);
-      const scene1 = await fetchPollinationsImageWithRetries(
-        expanded[0],
+      const scene1Result = await fetchFreeAiImageWithWaterfall({
+        prompt: expanded[0],
         aspectRatio,
         style,
-        baseSeed,
-        (msg) => onProgress(12, msg, totalSeconds)
-      );
-      sceneImages.push(scene1);
+        seed: baseSeed,
+        onStatus: (msg) => onProgress(12, `Scene 1/3: ${msg}`, totalSeconds),
+      });
+      sceneImages.push(scene1Result.img);
+      tempObjectUrls.push(scene1Result.objectUrl);
 
-      // Attempt Scene 2 & Scene 3 cleanly; if Pollinations rate-limits mid-sequence, reuse Scene 1 with distinct framing
+      // Attempt Scene 2 & Scene 3 via backup providers cleanly; reuse validated Scene 1 if busy
       for (let idx = 1; idx < 3; idx += 1) {
         const pct = 18 + idx * 8;
         onProgress(pct, `Generating AI Scene ${idx + 1} of 3...`, totalSeconds);
         try {
-          const nextScene = await fetchPollinationsImageWithRetries(
-            expanded[idx],
+          const nextResult = await fetchFreeAiImageWithWaterfall({
+            prompt: expanded[idx],
             aspectRatio,
             style,
-            baseSeed + idx * 149,
-            (msg) => onProgress(pct, msg, totalSeconds)
-          );
-          sceneImages.push(nextScene);
+            seed: baseSeed + idx * 173,
+            onStatus: (msg) => onProgress(pct, `Scene ${idx + 1}/3: ${msg}`, totalSeconds),
+          });
+          sceneImages.push(nextResult.img);
+          tempObjectUrls.push(nextResult.objectUrl);
         } catch {
-          // Keep using real AI Scene 1 image rather than ever rendering fake hills
-          sceneImages.push(scene1);
+          sceneImages.push(scene1Result.img);
         }
       }
     } else {
       onProgress(10, 'Generating AI Scene...', totalSeconds);
-      const mainScene = await fetchPollinationsImageWithRetries(
-        visualPrompt,
+      const mainResult = await fetchFreeAiImageWithWaterfall({
+        prompt: visualPrompt,
         aspectRatio,
         style,
-        Date.now(),
-        (msg) => onProgress(12, msg, totalSeconds)
-      );
-      sceneImages.push(mainScene);
+        onStatus: (msg) => onProgress(14, msg, totalSeconds),
+      });
+      sceneImages.push(mainResult.img);
+      tempObjectUrls.push(mainResult.objectUrl);
     }
   }
 
@@ -593,6 +521,9 @@ export async function renderDemoVideo({
   onProgress(99, 'Finalizing downloadable video...', 0);
   recorder.stop();
   const blob = await recordingFinished;
+  for (const tempUrl of tempObjectUrls) {
+    URL.revokeObjectURL(tempUrl);
+  }
   const mediaUrl = URL.createObjectURL(blob);
   onProgress(100, 'Video ready.', 0);
 

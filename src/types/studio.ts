@@ -136,7 +136,7 @@ export function buildPollinationsImageUrl(
   const resolvedPrompt = suffix ? `${prompt}, ${suffix}` : prompt;
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
     resolvedPrompt
-  )}?width=${dims.width}&height=${dims.height}&nologo=true&seed=${seed}`;
+  )}?model=flux&width=${dims.width}&height=${dims.height}&nologo=true&private=true&seed=${seed}`;
   return { url, width: dims.width, height: dims.height, resolvedPrompt };
 }
 
@@ -146,13 +146,13 @@ export function buildPollinationsFastKeyframeUrl(
   style: StylePresetId,
   seed: number = Date.now()
 ): { url: string; fetchWidth: number; fetchHeight: number; resolvedPrompt: string } {
-  const fetchWidth = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 720 : 1280;
-  const fetchHeight = aspectRatio === '9:16' ? 1280 : 720;
+  const fetchWidth = aspectRatio === '9:16' ? 576 : aspectRatio === '1:1' ? 768 : 1024;
+  const fetchHeight = aspectRatio === '9:16' ? 1024 : aspectRatio === '1:1' ? 768 : 576;
   const suffix = STYLE_PROMPT_SUFFIX[style] ?? '';
   const resolvedPrompt = suffix ? `${prompt}, ${suffix}` : prompt;
   const url = `https://image.pollinations.ai/prompt/${encodeURIComponent(
     resolvedPrompt
-  )}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&seed=${seed}`;
+  )}?model=flux&width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&seed=${seed}`;
   return { url, fetchWidth, fetchHeight, resolvedPrompt };
 }
 
