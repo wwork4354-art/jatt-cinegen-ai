@@ -73,6 +73,7 @@ interface PromptPanelProps {
   onVideoSourceModeChange: (mode: VideoSourceMode) => void;
   hfToken: string;
   onHfTokenChange: (token: string) => void;
+  hasGpuKeys: boolean;
   onOpenEngineVault: () => void;
   customBackendUrl: string;
   onCustomBackendUrlChange: (url: string) => void;
@@ -170,6 +171,7 @@ export function PromptPanel({
   onVideoSourceModeChange,
   hfToken,
   onHfTokenChange,
+  hasGpuKeys,
   onOpenEngineVault,
   customBackendUrl,
   onCustomBackendUrlChange,
@@ -484,6 +486,23 @@ export function PromptPanel({
           </div>
         </div>
       </div>
+
+      {/* Helpful Tip Banner when no HF Token / Gemini Key is entered in Preview */}
+      {!hasGpuKeys && (mode === 'image-to-video' || isLipSyncMode || mode === 'text-to-video') && (
+        <div className="flex flex-col gap-2 rounded-xl border border-amber-400/35 bg-amber-400/[0.08] px-3.5 py-2.5 text-xs text-amber-100 sm:flex-row sm:items-center sm:justify-between">
+          <span className="leading-relaxed">
+            Tip: Deploy to Vercel (where your keys are saved) or paste your Free Hugging Face Token in Engine Settings for real GPU motion!
+          </span>
+          <button
+            type="button"
+            onClick={onOpenEngineVault}
+            className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-amber-300/45 bg-amber-300/15 px-3 py-1.5 text-[11px] font-semibold text-amber-100 hover:bg-amber-300/25 transition-colors whitespace-nowrap"
+          >
+            <KeyRound className="h-3.5 w-3.5" />
+            <span>Engine Settings</span>
+          </button>
+        </div>
+      )}
 
       {/* Image / Portrait Uploader for Image to Video & AI Lip-Sync */}
       {(mode === 'image-to-video' || isLipSyncMode) && (

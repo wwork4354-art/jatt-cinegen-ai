@@ -357,12 +357,12 @@ async function runGradioJob(params: {
     hfToken,
     onProgress,
     existingClient,
-    connectTimeoutMs = 8000,
-    quickQueueTimeoutMs = 8000,
-    jobTimeoutMs = 55000,
+    connectTimeoutMs = 12000,
+    quickQueueTimeoutMs = hfToken?.trim() ? 25000 : 12000,
+    jobTimeoutMs = 95000,
   } = params;
 
-  onProgress(24, `Quick-checking ${label} on Hugging Face...`);
+  onProgress(22, `Sending request to ${label} GPU...`);
   const client = existingClient ?? (await connectSpaceFast(spaceId, hfToken, connectTimeoutMs));
 
   onProgress(28, `Checking queue availability on ${label}...`);
@@ -388,19 +388,19 @@ async function runGradioJob(params: {
       if (stage === 'error') {
         throw new Error(msgText || `${label} GPU returned an error`);
       }
-      if (typeof rawMsg.eta === 'number' && rawMsg.eta > 45) {
+      if (typeof rawMsg.eta === 'number' && rawMsg.eta > (hfToken?.trim() ? 90 : 45)) {
         throw new Error(`${label} GPU queue wait too long (~${Math.round(rawMsg.eta)}s)`);
       }
       if (stage === 'generating') {
         hasStartedGenerating = true;
         onProgress(58, `Generating Real Motion Frames via ${label}...`);
       } else if (typeof rawMsg.position === 'number' && rawMsg.position > 0) {
-        if (rawMsg.position > 5 && !hfToken?.trim()) {
+        if (rawMsg.position > 8 && !hfToken?.trim()) {
           throw new Error(`${label} queue full (#${rawMsg.position})`);
         }
-        onProgress(32, `Free GPU Queue (#${rawMsg.position}) on ${label}...`);
+        onProgress(34, `Free GPU Queue (#${rawMsg.position}) on ${label}...`);
       } else {
-        onProgress(36, `Preparing ${label} Free GPU...`);
+        onProgress(38, `Sending photo to AI GPU for real motion (${label})...`);
       }
     } else if (rawMsg.type === 'data') {
       resultData = rawMsg.data;
@@ -502,8 +502,42 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 2B: Hugging Face Qwen Wan 2.1 / Wan 2.1 Fast
+  // PRIORITY 2B: Hugging Face Image-to-Video (LTX-Video -> Qwen Wan 2.1 Fast -> Stable Video Diffusion)
   if (mode === 'image-to-video' && imageBlob) {
+    attempts.push({
+      badge: 'Rendered via LTX-Video GPU',
+      run: async () => {
+        onEvent({
+          type: 'progress',
+          percent: 20,
+          message: 'Sending photo to AI GPU for real motion...',
+        });
+        const res = await runGradioJob({
+          spaceId: 'Lightricks/ltx-video-distilled',
+          label: 'LTX-Video Distilled',
+          endpoint: '/image_to_video',
+          payload: {
+            prompt,
+            negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
+            input_image_filepath: handle_file(imageBlob),
+            input_video_filepath: null,
+            height_ui: height,
+            width_ui: width,
+            mode: 'image-to-video',
+            duration_ui: 2,
+            ui_frames_to_use: 9,
+            seed_ui: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+            ui_guidance_scale: 1,
+            improve_texture_flag: true,
+          },
+          hfToken: resolvedHfToken,
+          onProgress: progressCb,
+        });
+        return { ...res, width, height };
+      },
+    });
+
     attempts.push({
       badge: 'Rendered via Qwen Wan 2.1',
       run: async () => {
@@ -518,7 +552,8 @@ export async function generateSmartMultiEngineVideo(params: {
             prompt,
             height: wanH,
             width: wanW,
-            duration_seconds: 3,
+            negative_prompt: 'blurry, static, jittery, distorted, watermark, text, low quality',
+            duration_seconds: 2,
             guidance_scale: 1,
             steps: 4,
             seed: Math.floor(Math.random() * 1000000),
@@ -530,11 +565,61 @@ export async function generateSmartMultiEngineVideo(params: {
         return { ...res, width: wanW, height: wanH };
       },
     });
+
+    attempts.push({
+      badge: 'Rendered via Stable Video Diffusion GPU',
+      run: async () => {
+        const res = await runGradioJob({
+          spaceId: 'stabilityai/stable-video-diffusion',
+          label: 'Stable Video Diffusion',
+          endpoint: '/video',
+          payload: {
+            image: handle_file(imageBlob),
+            seed: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+            motion_bucket_id: 127,
+            fps_id: 6,
+          },
+          hfToken: resolvedHfToken,
+          onProgress: progressCb,
+        });
+        return { ...res, width: 1024, height: 576 };
+      },
+    });
   } else {
+    attempts.push({
+      badge: 'Rendered via LTX-Video GPU',
+      run: async () => {
+        const res = await runGradioJob({
+          spaceId: 'Lightricks/ltx-video-distilled',
+          label: 'LTX-Video Distilled',
+          endpoint: '/text_to_video',
+          payload: {
+            prompt,
+            negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
+            input_image_filepath: null,
+            input_video_filepath: null,
+            height_ui: height,
+            width_ui: width,
+            mode: 'text-to-video',
+            duration_ui: 2,
+            ui_frames_to_use: 9,
+            seed_ui: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+            ui_guidance_scale: 1,
+            improve_texture_flag: true,
+          },
+          hfToken: resolvedHfToken,
+          onProgress: progressCb,
+        });
+        return { ...res, width, height };
+      },
+    });
+
     attempts.push({
       badge: 'Rendered via Qwen Wan 2.1',
       run: async () => {
-        const client = await connectSpaceFast('Wan-AI/Wan2.1', resolvedHfToken, 8000);
+        const client = await connectSpaceFast('Wan-AI/Wan2.1', resolvedHfToken, 10000);
         const apiInfo = (await withTimeout(client.view_api(), 5000, 'Inspect Wan2.1 API')) as {
           named_endpoints?: Record<string, unknown>;
         };
@@ -557,41 +642,7 @@ export async function generateSmartMultiEngineVideo(params: {
         return { ...res, width: 832, height: 480 };
       },
     });
-  }
 
-  // PRIORITY 2C: Lightricks/ltx-video-distilled
-  attempts.push({
-    badge: 'Rendered via LTX-Video GPU',
-    run: async () => {
-      const endpoint = mode === 'image-to-video' && imageBlob ? '/image_to_video' : '/text_to_video';
-      const res = await runGradioJob({
-        spaceId: 'Lightricks/ltx-video-distilled',
-        label: 'LTX-Video Distilled',
-        endpoint,
-        payload: {
-          prompt,
-          negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
-          input_image_filepath: mode === 'image-to-video' && imageBlob ? handle_file(imageBlob) : null,
-          input_video_filepath: null,
-          height_ui: height,
-          width_ui: width,
-          mode: mode === 'image-to-video' && imageBlob ? 'image-to-video' : 'text-to-video',
-          duration_ui: 3,
-          ui_frames_to_use: 9,
-          seed_ui: Math.floor(Math.random() * 1000000),
-          randomize_seed: true,
-          ui_guidance_scale: 1,
-          improve_texture_flag: true,
-        },
-        hfToken: resolvedHfToken,
-        onProgress: progressCb,
-      });
-      return { ...res, width, height };
-    },
-  });
-
-  // PRIORITY 2D: zai-org/CogVideoX-2b-space
-  if (mode === 'text-to-video') {
     attempts.push({
       badge: 'Rendered via CogVideoX GPU',
       run: async () => {
@@ -793,9 +844,9 @@ export async function generateLipSyncVideo(params: {
         payload,
         hfToken: resolvedHfToken,
         existingClient: client,
-        connectTimeoutMs: 8000,
-        quickQueueTimeoutMs: 8000,
-        jobTimeoutMs: 65000,
+        connectTimeoutMs: 12000,
+        quickQueueTimeoutMs: resolvedHfToken ? 25000 : 12000,
+        jobTimeoutMs: 95000,
         onProgress: progressCb,
       });
 

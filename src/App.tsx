@@ -9,6 +9,10 @@ import { DeveloperFooter } from './components/DeveloperFooter';
 import { EngineVaultModal } from './components/EngineVaultModal';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
+import {
+  runDirectBrowserAiVideo,
+  runDirectBrowserLipSync,
+} from './lib/clientGpuVideo';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
@@ -81,21 +85,18 @@ export default function App() {
       return '';
     }
   });
+  const envGemini = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ?? '';
+  const envHf = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? '';
+  const envSf = (import.meta.env.VITE_SILICONFLOW_KEY as string | undefined) ?? '';
+
   const [hfToken, setHfToken] = useState<string>(() => {
     try {
-      return (
-        localStorage.getItem(HF_TOKEN_STORAGE_KEY) ||
-        (import.meta.env.VITE_HF_TOKEN as string | undefined) ||
-        ''
-      );
+      return localStorage.getItem(HF_TOKEN_STORAGE_KEY) || envHf || '';
     } catch {
-      return '';
+      return envHf || '';
     }
   });
   const [engineVaultKeys, setEngineVaultKeys] = useState<EngineVaultKeys>(() => {
-    const envGemini = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ?? '';
-    const envHf = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? '';
-    const envSf = (import.meta.env.VITE_SILICONFLOW_KEY as string | undefined) ?? '';
     try {
       const saved = localStorage.getItem(ENGINE_VAULT_STORAGE_KEY);
       if (saved) {
@@ -396,14 +397,14 @@ export default function App() {
   const runLipSyncVideo = async (trimmedDialogue: string) => {
     if (!uploadedImageUrl) return;
     setErrorMessage(null);
-    const activeHfToken = (engineVaultKeys.hfToken || hfToken).trim();
+    const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
     const activeVoice = getVoiceLanguageById(voiceLanguageId);
     const displayLabel =
       lipSyncAudioMode === 'upload' && lipSyncAudioFile
         ? `Lip-Sync: ${lipSyncAudioFile.name}`
         : trimmedDialogue;
 
-    startTimer('Preparing portrait & audio for AI Lip-Sync...');
+    startTimer('Sending portrait & audio to Lip-Sync AI GPU...');
 
     try {
       let imagePayload = uploadedImageUrl;
@@ -450,6 +451,7 @@ export default function App() {
       }
 
       let generatedCloudLipSync = false;
+      let shouldTryDirectBrowser = false;
 
       if (audioDataUrl && imagePayload) {
         try {
@@ -463,7 +465,9 @@ export default function App() {
             }),
           });
 
-          if (response.ok && response.body) {
+          if (!response.ok || !response.body) {
+            shouldTryDirectBrowser = true;
+          } else {
             const reader = response.body.getReader();
             const decoder = new TextDecoder();
             let buffer = '';
@@ -542,12 +546,52 @@ export default function App() {
             }
           }
         } catch {
-          // Fall through smoothly to Smart Canvas Lip-Sync Animator
+          shouldTryDirectBrowser = true;
         }
       }
 
       if (generatedCloudLipSync) {
         return;
+      }
+
+      // Direct Browser @gradio/client Lip-Sync (runs when /api/generate/lip-sync is unavailable, e.g. Vercel static hosting)
+      if (shouldTryDirectBrowser && audioBlob) {
+        try {
+          const directLipSync = await runDirectBrowserLipSync({
+            imageDataUrl: imagePayload,
+            audioBlob,
+            hfToken: activeHfToken,
+            onProgress: (percent, statusMessage) => {
+              setProgress((p) =>
+                p.active ? { ...p, percent, statusMessage } : p
+              );
+            },
+          });
+
+          if (directLipSync) {
+            const item: CreationItem = {
+              id: crypto.randomUUID(),
+              kind: 'video',
+              sourceMode: 'lip-sync',
+              prompt: displayLabel,
+              style: 'realistic',
+              aspectRatio,
+              width: directLipSync.width,
+              height: directLipSync.height,
+              duration,
+              quality,
+              engineLabel: directLipSync.engineLabel,
+              mediaUrl: directLipSync.mediaUrl,
+              mimeType: directLipSync.mimeType,
+              createdAt: Date.now(),
+              blob: directLipSync.blob,
+            };
+            await persistNewCreation(item);
+            return;
+          }
+        } catch {
+          // Proceed cleanly to Smart Canvas Lip-Sync Animator fallback
+        }
       }
 
       // Smart Canvas Lip-Sync Animator Fallback (Never fails)
@@ -630,11 +674,20 @@ export default function App() {
     targetMode: 'text-to-video' | 'image-to-video'
   ) => {
     setErrorMessage(null);
-    const activeHfToken = (engineVaultKeys.hfToken || hfToken).trim();
-    startTimer('Routing to best available AI Video Engine...');
+    const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
+    const activeGeminiKey = (engineVaultKeys.geminiKey || envGemini).trim();
+    const activeSiliconKey = (engineVaultKeys.siliconFlowKey || envSf).trim();
+
+    startTimer(
+      targetMode === 'image-to-video'
+        ? 'Sending photo to AI GPU for real motion...'
+        : 'Routing to best available AI Video Engine...'
+    );
 
     let generatedRealMp4 = false;
     let needsCinemaFallback = false;
+    let shouldTryDirectBrowser = false;
+    let imagePayload = uploadedImageUrl ?? undefined;
 
     try {
       const { englishPrompt } = await translatePromptToEnglish(
@@ -643,116 +696,160 @@ export default function App() {
       );
       const effectivePrompt = englishPrompt || trimmedPrompt;
 
-      let imagePayload = uploadedImageUrl ?? undefined;
       if (targetMode === 'image-to-video' && uploadedImageUrl?.startsWith('blob:')) {
         const fetched = await fetch(uploadedImageUrl);
         imagePayload = await blobToDataUrl(await fetched.blob());
       }
 
-      const response = await fetch('/api/generate/hf-video', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      try {
+        const response = await fetch('/api/generate/hf-video', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: effectivePrompt,
+            mode: targetMode,
+            aspectRatio,
+            style: stylePreset,
+            imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
+            geminiKey: activeGeminiKey || undefined,
+            hfToken: activeHfToken || undefined,
+            siliconFlowKey: activeSiliconKey || undefined,
+          }),
+        });
+
+        if (!response.ok || !response.body) {
+          shouldTryDirectBrowser = true;
+        } else {
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+
+            for (const rawLine of lines) {
+              const line = rawLine.trim();
+              if (!line.startsWith('data:')) continue;
+              const jsonText = line.slice(5).trim();
+              if (!jsonText) continue;
+
+              const evt = JSON.parse(jsonText) as {
+                type: 'progress' | 'done' | 'busy';
+                percent?: number;
+                message: string;
+                providerLabel?: string;
+                videoApiPath?: string;
+                mimeType?: string;
+                width?: number;
+                height?: number;
+              };
+
+              if (evt.type === 'progress') {
+                setProgress((prev) =>
+                  prev.active
+                    ? {
+                        ...prev,
+                        percent: evt.percent ?? prev.percent,
+                        statusMessage: evt.message,
+                      }
+                    : prev
+                );
+              } else if (evt.type === 'busy') {
+                needsCinemaFallback = true;
+                break;
+              } else if (evt.type === 'done' && evt.videoApiPath) {
+                setProgress((prev) =>
+                  prev.active
+                    ? {
+                        ...prev,
+                        percent: 95,
+                        statusMessage: 'Preparing MP4 playback...',
+                      }
+                    : prev
+                );
+
+                const mediaRes = await fetch(evt.videoApiPath);
+                if (!mediaRes.ok) {
+                  needsCinemaFallback = true;
+                  break;
+                }
+                const blob = await mediaRes.blob();
+                const mediaUrl = URL.createObjectURL(blob);
+
+                const item: CreationItem = {
+                  id: crypto.randomUUID(),
+                  kind: 'video',
+                  sourceMode: targetMode,
+                  prompt: trimmedPrompt,
+                  style: stylePreset,
+                  aspectRatio,
+                  width: evt.width ?? 704,
+                  height: evt.height ?? 512,
+                  duration,
+                  cameraMotion,
+                  quality,
+                  engineLabel: evt.providerLabel || 'Free AI Video GPU',
+                  mediaUrl,
+                  mimeType: evt.mimeType || 'video/mp4',
+                  createdAt: Date.now(),
+                  blob,
+                };
+
+                await persistNewCreation(item);
+                generatedRealMp4 = true;
+              }
+            }
+
+            if (needsCinemaFallback || generatedRealMp4) break;
+          }
+        }
+      } catch {
+        shouldTryDirectBrowser = true;
+      }
+
+      // Direct Browser @gradio/client + Google Veo REST fallback (handles Vercel static deployments where /api/* returns 404)
+      if (!generatedRealMp4 && shouldTryDirectBrowser) {
+        const directResult = await runDirectBrowserAiVideo({
           prompt: effectivePrompt,
           mode: targetMode,
           aspectRatio,
-          style: stylePreset,
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
-          geminiKey: engineVaultKeys.geminiKey.trim() || undefined,
-          hfToken: activeHfToken || undefined,
-          siliconFlowKey: engineVaultKeys.siliconFlowKey.trim() || undefined,
-        }),
-      });
+          geminiKey: activeGeminiKey,
+          hfToken: activeHfToken,
+          onProgress: (percent, statusMessage) => {
+            setProgress((prev) =>
+              prev.active ? { ...prev, percent, statusMessage } : prev
+            );
+          },
+        });
 
-      if (!response.ok || !response.body) {
-        needsCinemaFallback = true;
-      } else {
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = '';
+        if (directResult) {
+          const item: CreationItem = {
+            id: crypto.randomUUID(),
+            kind: 'video',
+            sourceMode: targetMode,
+            prompt: trimmedPrompt,
+            style: stylePreset,
+            aspectRatio,
+            width: directResult.width,
+            height: directResult.height,
+            duration,
+            cameraMotion,
+            quality,
+            engineLabel: directResult.engineLabel,
+            mediaUrl: directResult.mediaUrl,
+            mimeType: directResult.mimeType,
+            createdAt: Date.now(),
+            blob: directResult.blob,
+          };
 
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const lines = buffer.split('\n');
-          buffer = lines.pop() ?? '';
-
-          for (const rawLine of lines) {
-            const line = rawLine.trim();
-            if (!line.startsWith('data:')) continue;
-            const jsonText = line.slice(5).trim();
-            if (!jsonText) continue;
-
-            const evt = JSON.parse(jsonText) as {
-              type: 'progress' | 'done' | 'busy';
-              percent?: number;
-              message: string;
-              providerLabel?: string;
-              videoApiPath?: string;
-              mimeType?: string;
-              width?: number;
-              height?: number;
-            };
-
-            if (evt.type === 'progress') {
-              setProgress((prev) =>
-                prev.active
-                  ? {
-                      ...prev,
-                      percent: evt.percent ?? prev.percent,
-                      statusMessage: evt.message,
-                    }
-                  : prev
-              );
-            } else if (evt.type === 'busy') {
-              needsCinemaFallback = true;
-              break;
-            } else if (evt.type === 'done' && evt.videoApiPath) {
-              setProgress((prev) =>
-                prev.active
-                  ? {
-                      ...prev,
-                      percent: 95,
-                      statusMessage: 'Preparing MP4 playback...',
-                    }
-                  : prev
-              );
-
-              const mediaRes = await fetch(evt.videoApiPath);
-              if (!mediaRes.ok) {
-                needsCinemaFallback = true;
-                break;
-              }
-              const blob = await mediaRes.blob();
-              const mediaUrl = URL.createObjectURL(blob);
-
-              const item: CreationItem = {
-                id: crypto.randomUUID(),
-                kind: 'video',
-                sourceMode: targetMode,
-                prompt: trimmedPrompt,
-                style: stylePreset,
-                aspectRatio,
-                width: evt.width ?? 704,
-                height: evt.height ?? 512,
-                duration,
-                cameraMotion,
-                quality,
-                engineLabel: evt.providerLabel || 'Free AI Video GPU',
-                mediaUrl,
-                mimeType: evt.mimeType || 'video/mp4',
-                createdAt: Date.now(),
-                blob,
-              };
-
-              await persistNewCreation(item);
-              generatedRealMp4 = true;
-            }
-          }
-
-          if (needsCinemaFallback || generatedRealMp4) break;
+          await persistNewCreation(item);
+          generatedRealMp4 = true;
         }
       }
     } catch {
@@ -765,10 +862,13 @@ export default function App() {
       return;
     }
 
-    // Automatically & smoothly render high-detail 3-Scene AI Cinematic Video with zero blocking errors
+    // Final backup: 3D Parallax Motion Engine (image-to-video) or 3-Scene AI Reel (text-to-video)
     await runFastDemoReel(trimmedPrompt, targetMode, {
       preserveTimer: true,
-      fallbackReason: 'Free GPU queue full — rendering 3-Scene AI Cinematic Video...',
+      fallbackReason:
+        targetMode === 'image-to-video'
+          ? 'GPU queue full — rendering 3D Parallax Motion Engine...'
+          : 'Free GPU queue full — rendering 3-Scene AI Cinematic Video...',
     });
   };
 
@@ -1060,9 +1160,9 @@ export default function App() {
   }, [activeTab, stopTimer]);
 
   const configuredKeyCount = [
-    engineVaultKeys.geminiKey.trim(),
-    (engineVaultKeys.hfToken || hfToken).trim(),
-    engineVaultKeys.siliconFlowKey.trim(),
+    (engineVaultKeys.geminiKey || envGemini).trim(),
+    (engineVaultKeys.hfToken || hfToken || envHf).trim(),
+    (engineVaultKeys.siliconFlowKey || envSf).trim(),
   ].filter(Boolean).length;
 
   return (
@@ -1147,11 +1247,15 @@ export default function App() {
                   onBackgroundMusicChange={setBackgroundMusicFile}
                   videoSourceMode={videoSourceMode}
                   onVideoSourceModeChange={setVideoSourceMode}
-                  hfToken={engineVaultKeys.hfToken || hfToken}
+                  hfToken={engineVaultKeys.hfToken || hfToken || envHf}
                   onHfTokenChange={(nextToken) => {
                     setHfToken(nextToken);
                     setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
                   }}
+                  hasGpuKeys={Boolean(
+                    (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
+                      (engineVaultKeys.geminiKey || envGemini).trim()
+                  )}
                   onOpenEngineVault={() => setIsEngineVaultOpen(true)}
                   customBackendUrl={customBackendUrl}
                   onCustomBackendUrlChange={setCustomBackendUrl}

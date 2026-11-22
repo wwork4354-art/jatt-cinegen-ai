@@ -56,7 +56,8 @@ export function EngineVaultModal({
               AI Engines &amp; Free API Keys
             </h2>
             <p className="text-xs leading-relaxed text-slate-400">
-              Optional free API keys unlock higher-priority cloud video GPUs. Leave any field blank and Jatt CineGen AI works 100% free out-of-the-box via Smart Waterfall Routing.
+              Reads Vercel env keys (<code className="text-cyan-300">VITE_HF_TOKEN</code>,{' '}
+              <code className="text-cyan-300">VITE_GEMINI_API_KEY</code>) automatically, or paste keys here (<code className="text-slate-300">localStorage</code>) for real GPU motion in AI Studio Preview &amp; Vercel Live.
             </p>
           </div>
           <button
@@ -74,7 +75,7 @@ export function EngineVaultModal({
           <ShieldCheck className="h-4 w-4 shrink-0 text-cyan-400" />
           <span>
             Never-Stop Waterfall: <strong className="text-white">Google Veo 2.0</strong> →{' '}
-            <strong className="text-white">Qwen Wan 2.1 / LTX-Video</strong> →{' '}
+            <strong className="text-white">LTX-Video · Wan 2.1 · SVD · SadTalker</strong> →{' '}
             <strong className="text-cyan-300">CineGen Unlimited Engine</strong>
           </span>
         </div>
@@ -88,9 +89,11 @@ export function EngineVaultModal({
                 className="flex items-center gap-1.5 text-xs font-semibold text-slate-200"
               >
                 <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
-                1. Google Gemini / Veo API Key (Optional)
+                1. Google Gemini / Veo API Key (VITE_GEMINI_API_KEY)
               </label>
-              <span className="text-[10px] font-mono text-slate-400">veo-2.0-generate-001</span>
+              <span className="text-[10px] font-mono text-slate-400">
+                {draftGeminiKey.trim() ? 'Active' : 'veo-2.0-generate-001'}
+              </span>
             </div>
             <div className="relative flex items-center">
               <input
@@ -121,9 +124,11 @@ export function EngineVaultModal({
                 className="flex items-center gap-1.5 text-xs font-semibold text-slate-200"
               >
                 <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
-                2. Hugging Face Free Token (Optional)
+                2. Hugging Face Free Token (VITE_HF_TOKEN)
               </label>
-              <span className="text-[10px] font-mono text-slate-400">Wan2.1 · LTX · CogVideoX</span>
+              <span className="text-[10px] font-mono text-slate-400">
+                {draftHfToken.trim() ? 'Active' : 'LTX · Wan2.1 · SVD · SadTalker'}
+              </span>
             </div>
             <div className="relative flex items-center">
               <input
@@ -131,7 +136,7 @@ export function EngineVaultModal({
                 type={visibleField === 'hf' ? 'text' : 'password'}
                 value={draftHfToken}
                 onChange={(e) => setDraftHfToken(e.target.value)}
-                placeholder="hf_... (optional free read token)"
+                placeholder="hf_... (free Hugging Face Read token for real GPU motion)"
                 autoComplete="off"
                 className="min-h-[40px] w-full rounded-lg border border-white/10 bg-[#07090E] pl-3 pr-10 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
               />
