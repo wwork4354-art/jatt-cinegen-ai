@@ -652,3 +652,176 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 }
+
+interface GradioParamInfo {
+  parameter_name?: string;
+  label?: string;
+  component?: string;
+  parameter_default?: unknown;
+}
+
+function mapLipSyncPayload(
+  parameters: GradioParamInfo[] | undefined,
+  imageBlob: Blob,
+  audioBlob: Blob
+): Record<string, unknown> | unknown[] {
+  if (!Array.isArray(parameters) || parameters.length === 0) {
+    return [handle_file(imageBlob), handle_file(audioBlob)];
+  }
+
+  const objPayload: Record<string, unknown> = {};
+  let hasNamedKeys = true;
+  let placedImage = false;
+  let placedAudio = false;
+
+  for (const param of parameters) {
+    const key = param.parameter_name?.trim();
+    if (!key) {
+      hasNamedKeys = false;
+      break;
+    }
+    const hint = `${key} ${param.label ?? ''} ${param.component ?? ''}`.toLowerCase();
+
+    if (
+      !placedImage &&
+      (hint.includes('image') ||
+        hint.includes('portrait') ||
+        hint.includes('face') ||
+        hint.includes('source'))
+    ) {
+      objPayload[key] = handle_file(imageBlob);
+      placedImage = true;
+    } else if (
+      !placedAudio &&
+      (hint.includes('audio') ||
+        hint.includes('voice') ||
+        hint.includes('speech') ||
+        hint.includes('driven'))
+    ) {
+      objPayload[key] = handle_file(audioBlob);
+      placedAudio = true;
+    } else if (key === 'preprocess') {
+      objPayload[key] = 'crop';
+    } else if (key === 'still_mode' || key === 'still') {
+      objPayload[key] = true;
+    } else if (key === 'use_enhancer') {
+      objPayload[key] = false;
+    } else if (key === 'size_of_image' || key === 'size') {
+      objPayload[key] = 256;
+    } else if (param.parameter_default !== undefined) {
+      objPayload[key] = param.parameter_default;
+    }
+  }
+
+  if (hasNamedKeys && placedImage && placedAudio) {
+    return objPayload;
+  }
+
+  return [handle_file(imageBlob), handle_file(audioBlob)];
+}
+
+export async function generateLipSyncVideo(params: {
+  imageDataUrl: string;
+  audioDataUrl: string;
+  hfToken?: string;
+  onEvent: (event: HfProgressEvent) => void;
+  isAborted?: () => boolean;
+}): Promise<void> {
+  const { imageDataUrl, audioDataUrl, hfToken, onEvent, isAborted } = params;
+  const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || '').trim();
+
+  const imageBlob = dataUrlToBlob(imageDataUrl);
+  const audioBlob = dataUrlToBlob(audioDataUrl);
+
+  if (!imageBlob || !audioBlob) {
+    onEvent({
+      type: 'busy',
+      message: 'Switching to CineGen Smart Lip-Sync Animator...',
+    });
+    return;
+  }
+
+  const progressCb = (percent: number, message: string) => {
+    if (!isAborted?.()) {
+      onEvent({ type: 'progress', percent, message });
+    }
+  };
+
+  const spaces = [
+    { spaceId: 'fffiloni/SadTalker', label: 'SadTalker Lip-Sync GPU' },
+    { spaceId: 'vinthony/SadTalker', label: 'SadTalker v2 GPU' },
+    { spaceId: 'fudan-generative-ai/hallo', label: 'HallO Portrait GPU' },
+    { spaceId: 'camenduru/Wav2Lip', label: 'Wav2Lip Sync GPU' },
+  ];
+
+  let lastReason = 'Lip-Sync cloud queues busy';
+
+  for (let i = 0; i < spaces.length; i += 1) {
+    if (isAborted?.()) return;
+    const target = spaces[i];
+    try {
+      progressCb(18 + i * 5, `Connecting to ${target.label}...`);
+      const client = await connectSpaceFast(target.spaceId, resolvedHfToken, 8000);
+      const apiInfo = (await withTimeout(
+        client.view_api(),
+        5000,
+        `Inspect ${target.spaceId} API`
+      )) as {
+        named_endpoints?: Record<string, { parameters?: GradioParamInfo[] }>;
+      };
+
+      const endpoints = Object.keys(apiInfo.named_endpoints ?? {});
+      const preferred =
+        endpoints.find((e) =>
+          /predict|generate|test|inference|run|submit|talk|wav2lip/i.test(e)
+        ) || endpoints[0];
+
+      if (!preferred) {
+        throw new Error(`${target.spaceId} has no active lip-sync endpoint`);
+      }
+
+      const payload = mapLipSyncPayload(
+        apiInfo.named_endpoints?.[preferred]?.parameters,
+        imageBlob,
+        audioBlob
+      );
+
+      const res = await runGradioJob({
+        spaceId: target.spaceId,
+        label: target.label,
+        endpoint: preferred,
+        payload,
+        hfToken: resolvedHfToken,
+        existingClient: client,
+        connectTimeoutMs: 8000,
+        quickQueueTimeoutMs: 8000,
+        jobTimeoutMs: 65000,
+        onProgress: progressCb,
+      });
+
+      if (isAborted?.()) return;
+
+      const fileId = storeCachedHfVideo(res.buffer, res.mimeType);
+      onEvent({
+        type: 'done',
+        percent: 100,
+        message: 'Lip-synced talking video ready via HF Lip-Sync GPU!',
+        providerLabel: 'Rendered via HF Lip-Sync GPU',
+        videoApiPath: `/api/hf-video-file/${fileId}`,
+        mimeType: res.mimeType,
+        width: 512,
+        height: 512,
+      });
+      return;
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : 'Space unavailable';
+    }
+  }
+
+  if (!isAborted?.()) {
+    onEvent({
+      type: 'busy',
+      message: `Cloud Lip-Sync GPUs busy (${lastReason}) — switching to CineGen Smart Lip-Sync Animator...`,
+    });
+  }
+}

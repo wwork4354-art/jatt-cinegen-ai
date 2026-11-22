@@ -40,6 +40,7 @@ export const LANGUAGES: LanguageOption[] = [
 export interface UIStrings {
   navTextToVideo: string;
   navImageToVideo: string;
+  navLipSync: string;
   navTextToImage: string;
   navMyCreations: string;
   newCanvas: string;
@@ -69,6 +70,7 @@ export interface UIStrings {
   generateVideoBtn: string;
   generateImageBtn: string;
   animateBtn: string;
+  generateLipSyncBtn: string;
   generatingBtn: string;
   downloadVideoBtn: string;
   downloadImageBtn: string;
@@ -92,6 +94,7 @@ export interface UIStrings {
 const EN: UIStrings = {
   navTextToVideo: 'Text to Video (15s Auto)',
   navImageToVideo: 'Image to Video',
+  navLipSync: 'AI Lip-Sync / Singing Photo',
   navTextToImage: 'Text to Image',
   navMyCreations: 'My Creations',
   newCanvas: 'New Canvas',
@@ -121,6 +124,7 @@ const EN: UIStrings = {
   generateVideoBtn: 'Generate Real AI Video',
   generateImageBtn: 'Generate Full HD Image',
   animateBtn: 'Animate Image with AI',
+  generateLipSyncBtn: 'Generate Talking / Singing Video',
   generatingBtn: 'Generating...',
   downloadVideoBtn: 'Download MP4',
   downloadImageBtn: 'Download Full HD',

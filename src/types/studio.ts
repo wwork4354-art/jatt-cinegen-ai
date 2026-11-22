@@ -1,4 +1,9 @@
-export type StudioTab = 'text-to-image' | 'text-to-video' | 'image-to-video' | 'creations';
+export type StudioTab =
+  | 'text-to-video'
+  | 'image-to-video'
+  | 'lip-sync'
+  | 'text-to-image'
+  | 'creations';
 
 export type AspectRatio = '16:9' | '9:16' | '1:1';
 
@@ -47,7 +52,7 @@ export interface CameraMotionOption {
 export interface CreationItem {
   id: string;
   kind: 'image' | 'video';
-  sourceMode: 'text-to-image' | 'text-to-video' | 'image-to-video';
+  sourceMode: 'text-to-image' | 'text-to-video' | 'image-to-video' | 'lip-sync';
   prompt: string;
   style: StylePresetId;
   aspectRatio: AspectRatio;

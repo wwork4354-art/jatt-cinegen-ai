@@ -11,7 +11,8 @@ import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './li
 import { renderDemoVideo } from './lib/demoVideoRenderer';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
-import { translatePromptToEnglish } from './lib/voiceLanguages';
+import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
+import { getVoiceLanguageById, translatePromptToEnglish } from './lib/voiceLanguages';
 import {
   type AspectRatio,
   type CameraMotionId,
@@ -112,6 +113,8 @@ export default function App() {
   });
   const [isEngineVaultOpen, setIsEngineVaultOpen] = useState(false);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
+  const [lipSyncAudioMode, setLipSyncAudioMode] = useState<'upload' | 'tts'>('tts');
+  const [lipSyncAudioFile, setLipSyncAudioFile] = useState<File | null>(null);
   const [developerProfile, setDeveloperProfile] = useState<DeveloperProfile>(() => {
     try {
       const saved = localStorage.getItem(DEV_PROFILE_STORAGE_KEY);
@@ -369,7 +372,10 @@ export default function App() {
         duration,
         cameraMotion,
         quality,
-        engineLabel: 'Rendered via CineGen Unlimited Engine',
+        engineLabel:
+          targetMode === 'image-to-video'
+            ? 'Rendered via 3D Parallax Motion Engine'
+            : 'Rendered via CineGen Unlimited Engine',
         scenes: result.scenes,
         mediaUrl: result.mediaUrl,
         mimeType: result.mimeType,
@@ -380,6 +386,238 @@ export default function App() {
       await persistNewCreation(item);
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : 'Video rendering failed.');
+    } finally {
+      stopTimer();
+      setIsLivePreviewActive(false);
+      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+    }
+  };
+
+  const runLipSyncVideo = async (trimmedDialogue: string) => {
+    if (!uploadedImageUrl) return;
+    setErrorMessage(null);
+    const activeHfToken = (engineVaultKeys.hfToken || hfToken).trim();
+    const activeVoice = getVoiceLanguageById(voiceLanguageId);
+    const displayLabel =
+      lipSyncAudioMode === 'upload' && lipSyncAudioFile
+        ? `Lip-Sync: ${lipSyncAudioFile.name}`
+        : trimmedDialogue;
+
+    startTimer('Preparing portrait & audio for AI Lip-Sync...');
+
+    try {
+      let imagePayload = uploadedImageUrl;
+      if (uploadedImageUrl.startsWith('blob:')) {
+        const fetched = await fetch(uploadedImageUrl);
+        imagePayload = await blobToDataUrl(await fetched.blob());
+      }
+
+      let audioBlob: Blob | null = null;
+      let audioDataUrl: string | null = null;
+
+      if (lipSyncAudioMode === 'upload' && lipSyncAudioFile) {
+        audioBlob = lipSyncAudioFile;
+        audioDataUrl = await blobToDataUrl(lipSyncAudioFile);
+      } else if (trimmedDialogue) {
+        setProgress((p) =>
+          p.active
+            ? {
+                ...p,
+                percent: 12,
+                statusMessage: `Synthesizing ${activeVoice.englishName} AI voice audio...`,
+              }
+            : p
+        );
+        try {
+          const ttsRes = await fetch('/api/tts-audio', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              text: trimmedDialogue,
+              languageCode: activeVoice.translateHintCode,
+            }),
+          });
+          if (ttsRes.ok) {
+            const ttsData = (await ttsRes.json()) as { audioDataUrl?: string };
+            if (ttsData.audioDataUrl) {
+              audioDataUrl = ttsData.audioDataUrl;
+              audioBlob = dataUrlToBlob(ttsData.audioDataUrl);
+            }
+          }
+        } catch {
+          // Proceed with Canvas Animator fallback speech cadence if offline
+        }
+      }
+
+      let generatedCloudLipSync = false;
+
+      if (audioDataUrl && imagePayload) {
+        try {
+          const response = await fetch('/api/generate/lip-sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageDataUrl: imagePayload,
+              audioDataUrl,
+              hfToken: activeHfToken || undefined,
+            }),
+          });
+
+          if (response.ok && response.body) {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+            let cloudBusy = false;
+
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+
+              for (const rawLine of lines) {
+                const line = rawLine.trim();
+                if (!line.startsWith('data:')) continue;
+                const jsonText = line.slice(5).trim();
+                if (!jsonText) continue;
+
+                const evt = JSON.parse(jsonText) as {
+                  type: 'progress' | 'done' | 'busy';
+                  percent?: number;
+                  message: string;
+                  providerLabel?: string;
+                  videoApiPath?: string;
+                  mimeType?: string;
+                  width?: number;
+                  height?: number;
+                };
+
+                if (evt.type === 'progress') {
+                  setProgress((p) =>
+                    p.active
+                      ? { ...p, percent: evt.percent ?? p.percent, statusMessage: evt.message }
+                      : p
+                  );
+                } else if (evt.type === 'busy') {
+                  cloudBusy = true;
+                  break;
+                } else if (evt.type === 'done' && evt.videoApiPath) {
+                  setProgress((p) =>
+                    p.active ? { ...p, percent: 95, statusMessage: 'Preparing MP4 playback...' } : p
+                  );
+                  const mediaRes = await fetch(evt.videoApiPath);
+                  if (!mediaRes.ok) {
+                    cloudBusy = true;
+                    break;
+                  }
+                  const blob = await mediaRes.blob();
+                  const mediaUrl = URL.createObjectURL(blob);
+
+                  const item: CreationItem = {
+                    id: crypto.randomUUID(),
+                    kind: 'video',
+                    sourceMode: 'lip-sync',
+                    prompt: displayLabel,
+                    style: 'realistic',
+                    aspectRatio,
+                    width: evt.width ?? 512,
+                    height: evt.height ?? 512,
+                    duration,
+                    quality,
+                    engineLabel: evt.providerLabel || 'Rendered via HF Lip-Sync GPU',
+                    mediaUrl,
+                    mimeType: evt.mimeType || 'video/mp4',
+                    createdAt: Date.now(),
+                    blob,
+                  };
+
+                  await persistNewCreation(item);
+                  generatedCloudLipSync = true;
+                }
+              }
+
+              if (cloudBusy || generatedCloudLipSync) break;
+            }
+          }
+        } catch {
+          // Fall through smoothly to Smart Canvas Lip-Sync Animator
+        }
+      }
+
+      if (generatedCloudLipSync) {
+        return;
+      }
+
+      // Smart Canvas Lip-Sync Animator Fallback (Never fails)
+      setProgress((p) =>
+        p.active
+          ? {
+              ...p,
+              percent: 24,
+              statusMessage: 'Animating talking portrait with CineGen Lip-Sync Engine...',
+            }
+          : p
+      );
+
+      const rendered = await renderCanvasLipSyncVideo({
+        imageDataUrl: imagePayload,
+        audioBlob,
+        speechText: lipSyncAudioMode === 'tts' ? trimmedDialogue : undefined,
+        speechLocale: activeVoice.speechCode,
+        aspectRatio,
+        quality,
+        onFrameCanvas: (sourceCanvas) => {
+          setIsLivePreviewActive((prev) => (prev ? prev : true));
+          const target = liveCanvasRef.current;
+          if (!target) return;
+          const maxPreviewSide = 1280;
+          const scale = Math.min(
+            1,
+            maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+          );
+          const previewW = Math.round(sourceCanvas.width * scale);
+          const previewH = Math.round(sourceCanvas.height * scale);
+          if (target.width !== previewW || target.height !== previewH) {
+            target.width = previewW;
+            target.height = previewH;
+          }
+          const tctx = target.getContext('2d');
+          if (tctx) {
+            tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
+          }
+        },
+        onProgress: (percent, statusMessage, remainingSeconds) => {
+          setProgress((p) =>
+            p.active ? { ...p, percent, statusMessage, remainingSeconds } : p
+          );
+        },
+      });
+
+      const item: CreationItem = {
+        id: crypto.randomUUID(),
+        kind: 'video',
+        sourceMode: 'lip-sync',
+        prompt: displayLabel,
+        style: 'realistic',
+        aspectRatio,
+        width: rendered.width,
+        height: rendered.height,
+        duration,
+        quality,
+        engineLabel: 'Rendered via CineGen Lip-Sync Animator',
+        mediaUrl: rendered.mediaUrl,
+        mimeType: rendered.mimeType,
+        createdAt: Date.now(),
+        blob: rendered.blob,
+      };
+
+      await persistNewCreation(item);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Lip-Sync video rendering failed.'
+      );
     } finally {
       stopTimer();
       setIsLivePreviewActive(false);
@@ -537,6 +775,12 @@ export default function App() {
   const handleGenerate = async () => {
     if (activeTab === 'creations' || progress.active) return;
     const trimmedPrompt = prompt.trim();
+
+    if (activeTab === 'lip-sync') {
+      await runLipSyncVideo(trimmedPrompt);
+      return;
+    }
+
     if (!trimmedPrompt) return;
 
     setErrorMessage(null);
@@ -809,8 +1053,9 @@ export default function App() {
     if (activeTab === 'creations') {
       setActiveTab('text-to-video');
     }
-    if (activeTab === 'image-to-video') {
+    if (activeTab === 'image-to-video' || activeTab === 'lip-sync') {
       setUploadedImageUrl(null);
+      setLipSyncAudioFile(null);
     }
   }, [activeTab, stopTimer]);
 
@@ -912,6 +1157,10 @@ export default function App() {
                   onCustomBackendUrlChange={setCustomBackendUrl}
                   uploadedImageUrl={uploadedImageUrl}
                   onUploadedImageChange={setUploadedImageUrl}
+                  lipSyncAudioMode={lipSyncAudioMode}
+                  onLipSyncAudioModeChange={setLipSyncAudioMode}
+                  lipSyncAudioFile={lipSyncAudioFile}
+                  onLipSyncAudioFileChange={setLipSyncAudioFile}
                   recentImages={recentImages}
                   isGenerating={progress.active}
                   onGenerate={handleGenerate}

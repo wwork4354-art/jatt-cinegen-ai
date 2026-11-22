@@ -26,13 +26,14 @@ export function TopNav({
   const navItems: { id: StudioTab; label: string }[] = [
     { id: 'text-to-video', label: strings.navTextToVideo },
     { id: 'image-to-video', label: strings.navImageToVideo },
+    { id: 'lip-sync', label: strings.navLipSync },
     { id: 'text-to-image', label: strings.navTextToImage },
     { id: 'creations', label: strings.navMyCreations },
   ];
 
   return (
     <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#07090E]/95">
-      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-6 px-4 py-3.5 sm:px-6 lg:px-8">
+      <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-4 px-4 py-3.5 sm:px-6 lg:px-8">
         {/* Zone 1: Brand Wordmark + Developer Badge */}
         <div className="flex items-center gap-3 shrink-0">
           <button
@@ -43,7 +44,7 @@ export function TopNav({
             Jatt CineGen AI
           </button>
 
-          <span className="hidden sm:inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-200 whitespace-nowrap shrink-0">
+          <span className="hidden xl:inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-200 whitespace-nowrap shrink-0">
             <img
               src={developerAvatarUrl || '/creator-avatar.png'}
               alt="Jatt Official"
@@ -56,7 +57,7 @@ export function TopNav({
         {/* Zone 2: Concise Single-Line Navigation Links */}
         <nav
           aria-label="Studio modes"
-          className="hidden md:flex items-center gap-7"
+          className="hidden md:flex items-center gap-4 lg:gap-6"
         >
           {navItems.map((item) => {
             const isActive = activeTab === item.id;

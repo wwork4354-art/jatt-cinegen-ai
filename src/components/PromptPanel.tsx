@@ -20,6 +20,7 @@ import {
   SlidersHorizontal,
   Trash2,
   Upload,
+  Volume2,
   Wand2,
 } from 'lucide-react';
 import { LANGUAGES, type LanguageCode, type UIStrings } from '../lib/i18n';
@@ -77,6 +78,10 @@ interface PromptPanelProps {
   onCustomBackendUrlChange: (url: string) => void;
   uploadedImageUrl: string | null;
   onUploadedImageChange: (dataUrl: string | null) => void;
+  lipSyncAudioMode: 'upload' | 'tts';
+  onLipSyncAudioModeChange: (mode: 'upload' | 'tts') => void;
+  lipSyncAudioFile: File | null;
+  onLipSyncAudioFileChange: (file: File | null) => void;
   recentImages: CreationItem[];
   isGenerating: boolean;
   onGenerate: () => void;
@@ -127,6 +132,11 @@ const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations'>, string[]> = {
     'Bioluminescent deep-sea jellyfish drifting through dark indigo ocean abyss',
     'Futuristic Kyoto tramway crossing a rain-drenched lantern bridge at dusk',
   ],
+  'lip-sync': [
+    'Welcome to Jatt CineGen AI! Today we are turning any still photo into a living talking video.',
+    'Assalam-o-Alaikum dosto! Aaj hum AI ke zariye apni tasveer ko bolti aur gaati hui video bana rahe hain.',
+    'Sat Sri Akal saareyan nu! Ajj assi AI naal apni photo nu bolan wali video vich badal rahe haan.',
+  ],
 };
 
 export function PromptPanel({
@@ -165,15 +175,33 @@ export function PromptPanel({
   onCustomBackendUrlChange,
   uploadedImageUrl,
   onUploadedImageChange,
+  lipSyncAudioMode,
+  onLipSyncAudioModeChange,
+  lipSyncAudioFile,
+  onLipSyncAudioFileChange,
   recentImages,
   isGenerating,
   onGenerate,
 }: PromptPanelProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const audioInputRef = useRef<HTMLInputElement>(null);
+  const lipSyncAudioInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionInstanceLike | null>(null);
   const promptRef = useRef(prompt);
   promptRef.current = prompt;
+
+  const [lipSyncAudioPreviewUrl, setLipSyncAudioPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!lipSyncAudioFile) {
+      setLipSyncAudioPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(lipSyncAudioFile);
+    setLipSyncAudioPreviewUrl(url);
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [lipSyncAudioFile]);
 
   const [isDragging, setIsDragging] = useState(false);
   const [isListening, setIsListening] = useState(false);
@@ -341,6 +369,7 @@ export function PromptPanel({
   };
 
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video';
+  const isLipSyncMode = mode === 'lip-sync';
   const aspectOptions: AspectRatio[] = ['16:9', '9:16', '1:1'];
 
   const handleFileRead = (file: File) => {
@@ -387,15 +416,22 @@ export function PromptPanel({
 
   const canGenerate =
     !isGenerating &&
-    prompt.trim().length > 0 &&
-    (mode !== 'image-to-video' || Boolean(uploadedImageUrl)) &&
-    (!isVideoMode ||
-      videoSourceMode !== 'custom-backend' ||
-      customBackendUrl.trim().length > 0);
+    (isLipSyncMode
+      ? Boolean(uploadedImageUrl) &&
+        (lipSyncAudioMode === 'upload'
+          ? Boolean(lipSyncAudioFile)
+          : prompt.trim().length > 0)
+      : prompt.trim().length > 0 &&
+        (mode !== 'image-to-video' || Boolean(uploadedImageUrl)) &&
+        (!isVideoMode ||
+          videoSourceMode !== 'custom-backend' ||
+          customBackendUrl.trim().length > 0));
 
   const heading =
     mode === 'text-to-image'
       ? strings.navTextToImage
+      : mode === 'lip-sync'
+      ? strings.navLipSync
       : mode === 'text-to-video'
       ? strings.navTextToVideo
       : strings.navImageToVideo;
@@ -403,13 +439,15 @@ export function PromptPanel({
   const subtitle =
     mode === 'text-to-image'
       ? 'Generate Full HD images 100% free via Pollinations AI with zero key limits.'
+      : mode === 'lip-sync'
+      ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face Lip-Sync GPUs with instant Animator backup.'
       : mode === 'text-to-video'
       ? videoSourceMode === 'hf-gpu'
         ? 'Generates real moving AI character/object MP4 videos via free keyless Hugging Face Video GPUs.'
         : 'Auto-generates real AI & HD scenes and renders a continuous 15s video in-browser.'
       : videoSourceMode === 'hf-gpu'
-      ? 'Upload any photo and animate subjects with real AI video motion via free Hugging Face GPUs.'
-      : 'Upload any photo and animate it with smooth camera motion and optional audio.';
+      ? 'Upload any photo and animate subjects with real AI video motion or 3D Parallax Motion.'
+      : 'Upload any photo and animate it with 3D parallax depth motion and optional audio.';
 
   return (
     <section
@@ -447,12 +485,12 @@ export function PromptPanel({
         </div>
       </div>
 
-      {/* Image Uploader for Image to Video */}
-      {mode === 'image-to-video' && (
+      {/* Image / Portrait Uploader for Image to Video & AI Lip-Sync */}
+      {(mode === 'image-to-video' || isLipSyncMode) && (
         <div className="space-y-3">
           <div className="flex items-center justify-between">
             <label className="text-xs font-semibold tracking-wide text-slate-300">
-              Reference Image
+              {isLipSyncMode ? 'Portrait / Face Photo' : 'Reference Image'}
             </label>
             {uploadedImageUrl && (
               <button
@@ -483,11 +521,11 @@ export function PromptPanel({
               <img
                 src={uploadedImageUrl}
                 alt="Uploaded reference frame"
-                className="h-44 w-full object-cover"
+                className={isLipSyncMode ? 'h-52 w-full object-contain bg-black/50' : 'h-44 w-full object-cover'}
               />
               <div className="absolute inset-x-0 bottom-0 flex items-center justify-between bg-gradient-to-t from-black/85 via-black/45 to-transparent p-3">
                 <span className="text-xs font-medium text-slate-200">
-                  Source frame ready
+                  {isLipSyncMode ? 'Portrait ready for Lip-Sync' : 'Source frame ready'}
                 </span>
                 <button
                   type="button"
@@ -556,14 +594,98 @@ export function PromptPanel({
         </div>
       )}
 
-      {/* Prompt Input + Magic Enhance */}
+      {/* Lip-Sync Audio Input Mode Switcher (Upload Song/Audio OR Type 15-Lang Speech) */}
+      {isLipSyncMode && (
+        <div className="space-y-3 rounded-xl border border-white/10 bg-[#07090E]/80 p-3.5">
+          <div className="text-xs font-semibold tracking-wide text-slate-300">
+            Audio / Voice Input
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => onLipSyncAudioModeChange('upload')}
+              className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                lipSyncAudioMode === 'upload'
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <Music className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">Upload Audio / Song (MP3/WAV)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onLipSyncAudioModeChange('tts')}
+              className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold transition-colors ${
+                lipSyncAudioMode === 'tts'
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <Volume2 className="h-3.5 w-3.5 shrink-0" />
+              <span className="truncate">Type Speech (15 Languages)</span>
+            </button>
+          </div>
+
+          {lipSyncAudioMode === 'upload' && (
+            <div className="space-y-2.5 pt-1">
+              <input
+                ref={lipSyncAudioInputRef}
+                type="file"
+                accept="audio/*,.mp3,.wav,.m4a,.ogg"
+                className="hidden"
+                onChange={(e) => {
+                  const file = e.target.files?.[0] ?? null;
+                  onLipSyncAudioFileChange(file);
+                  e.target.value = '';
+                }}
+              />
+              {lipSyncAudioFile ? (
+                <div className="space-y-2 rounded-xl border border-cyan-400/40 bg-cyan-400/10 p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2 text-xs font-semibold text-cyan-200 truncate">
+                      <Music className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+                      <span className="truncate">{lipSyncAudioFile.name}</span>
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => onLipSyncAudioFileChange(null)}
+                      className="text-xs font-semibold text-rose-300 hover:text-rose-200 shrink-0"
+                    >
+                      {strings.musicRemove}
+                    </button>
+                  </div>
+                  {lipSyncAudioPreviewUrl && (
+                    <audio controls src={lipSyncAudioPreviewUrl} className="w-full h-9" />
+                  )}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => lipSyncAudioInputRef.current?.click()}
+                  className="flex w-full flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-white/15 bg-[#0D1118]/70 px-4 py-6 text-center hover:border-cyan-400/50 transition-colors"
+                >
+                  <Upload className="h-5 w-5 text-cyan-400" />
+                  <span className="text-xs font-semibold text-slate-200">
+                    Upload any Song, Naat, or Voice Note
+                  </span>
+                  <span className="text-[11px] text-slate-500">MP3, WAV, M4A, OGG</span>
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Prompt / Speech Script Input + Magic Enhance */}
+      {(!isLipSyncMode || lipSyncAudioMode === 'tts') && (
       <div className="space-y-2.5">
         <div className="flex items-center justify-between gap-2">
           <label
             htmlFor="studio-prompt"
             className="text-xs font-semibold tracking-wide text-slate-300"
           >
-            {strings.promptLabel}
+            {isLipSyncMode ? 'Dialogue / Speech Script (15 Languages AI Voice)' : strings.promptLabel}
           </label>
           <div className="flex items-center gap-2">
             {previousPrompt && (
@@ -605,7 +727,9 @@ export function PromptPanel({
             onChange={(e) => onPromptChange(e.target.value)}
             rows={4}
             placeholder={
-              mode === 'image-to-video'
+              isLipSyncMode
+                ? 'Type or speak lyrics/dialogue in English, Urdu, Punjabi, Saraiki, Pashto, Hindi, Arabic...'
+                : mode === 'image-to-video'
                 ? strings.promptPlaceholderAnimate
                 : mode === 'text-to-video'
                 ? strings.promptPlaceholderVideo
@@ -725,6 +849,7 @@ export function PromptPanel({
           </span>
         </div>
       </div>
+      )}
 
       {/* Aspect Ratio */}
       <div className="space-y-2.5">
@@ -770,7 +895,8 @@ export function PromptPanel({
         </div>
       </div>
 
-      {/* Style Presets */}
+      {/* Style Presets (not applicable to portrait lip-sync photos) */}
+      {!isLipSyncMode && (
       <div className="space-y-2.5">
         <span className="block text-xs font-semibold tracking-wide text-slate-300">
           {strings.stylePreset}
@@ -823,6 +949,65 @@ export function PromptPanel({
           })}
         </div>
       </div>
+      )}
+
+      {/* Export Quality Selector for Lip-Sync Mode */}
+      {isLipSyncMode && (
+        <div className="space-y-2 border-t border-white/[0.08] pt-4">
+          <div className="flex items-center justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-xs font-semibold tracking-wide text-slate-300">
+              <SlidersHorizontal className="h-3.5 w-3.5 text-slate-400" />
+              {strings.renderQuality}
+            </span>
+            <button
+              type="button"
+              onClick={onOpenEngineVault}
+              className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20 transition-colors"
+            >
+              <KeyRound className="h-3 w-3" />
+              <span>HF Token / Vault</span>
+            </button>
+          </div>
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => onQualityChange('720p')}
+              className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors ${
+                quality === '720p'
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <span className="text-xs font-semibold whitespace-nowrap">Fast 720p</span>
+              <span className="text-[11px] text-slate-400 whitespace-nowrap">3GB RAM Friendly</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onQualityChange('1080p')}
+              className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors ${
+                quality === '1080p'
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <span className="text-xs font-semibold whitespace-nowrap">{strings.fullHdMode}</span>
+              <span className="text-[11px] font-mono tabular-nums text-slate-400 whitespace-nowrap">1920×1080</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onQualityChange('4k')}
+              className={`flex flex-col items-start rounded-xl border px-3 py-2 text-left transition-colors ${
+                quality === '4k'
+                  ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#07090E]/75 text-slate-300 hover:border-white/25'
+              }`}
+            >
+              <span className="text-xs font-semibold whitespace-nowrap">{strings.ultraHd}</span>
+              <span className="text-[11px] font-mono tabular-nums text-slate-400 whitespace-nowrap">3840×2160</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Video-specific Controls */}
       {isVideoMode && (
@@ -1213,6 +1398,11 @@ export function PromptPanel({
             <Loader2 className="h-4 w-4 animate-spin" />
             {strings.generatingBtn}
           </>
+        ) : isLipSyncMode ? (
+          <>
+            <Mic className="h-4 w-4" />
+            {strings.generateLipSyncBtn}
+          </>
         ) : mode === 'text-to-image' ? (
           <>
             <ImagePlus className="h-4 w-4" />
@@ -1229,7 +1419,7 @@ export function PromptPanel({
         ) : videoSourceMode === 'hf-gpu' ? (
           strings.animateBtn
         ) : videoSourceMode === 'demo' ? (
-          'Animate with Fast Reel'
+          'Animate with 3D Parallax Reel'
         ) : (
           'Animate via Custom URL'
         )}

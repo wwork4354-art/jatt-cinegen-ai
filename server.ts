@@ -5,6 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
+  generateLipSyncVideo,
   generateSmartMultiEngineVideo,
   getCachedHfVideo,
   type HfAspectRatio,
@@ -357,6 +358,156 @@ async function startServer() {
     res.status(200);
     res.setHeader('Content-Length', String(total));
     res.end(entry.buffer);
+  });
+
+  // 2c. Free Zero-Key Multilingual AI Speech Synthesis (MP3) for Lip-Sync & Talking Photos
+  app.post('/api/tts-audio', async (req, res) => {
+    try {
+      const { text, languageCode } = req.body as {
+        text?: string;
+        languageCode?: string;
+      };
+
+      const cleanText = (text || '').trim().replace(/\s+/g, ' ');
+      if (!cleanText) {
+        res.status(400).json({ error: 'Dialogue text is required to synthesize AI voice.' });
+        return;
+      }
+
+      // Split into <= 175 char segments on word/punctuation boundaries
+      const chunks: string[] = [];
+      let remaining = cleanText.slice(0, 900);
+      while (remaining.length > 0) {
+        if (remaining.length <= 175) {
+          chunks.push(remaining);
+          break;
+        }
+        let splitIdx = remaining.lastIndexOf(' ', 175);
+        if (splitIdx < 40) splitIdx = 175;
+        chunks.push(remaining.slice(0, splitIdx).trim());
+        remaining = remaining.slice(splitIdx).trim();
+      }
+
+      const rawCode = (languageCode || 'en').trim();
+      const candidateLangs = Array.from(
+        new Set([
+          rawCode === 'zh-CN' ? 'zh-CN' : rawCode.split('-')[0] || 'en',
+          rawCode,
+          'ur',
+          'hi',
+          'en',
+        ])
+      );
+
+      let audioChunks: Buffer[] | null = null;
+      let usedLang = candidateLangs[0];
+
+      for (const tl of candidateLangs) {
+        try {
+          const buffers: Buffer[] = [];
+          for (const chunk of chunks) {
+            const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=${encodeURIComponent(
+              tl
+            )}&q=${encodeURIComponent(chunk)}`;
+            const ttsRes = await fetch(ttsUrl, {
+              headers: {
+                'User-Agent':
+                  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                Referer: 'https://translate.google.com/',
+              },
+            });
+            if (!ttsRes.ok) {
+              throw new Error(`TTS HTTP ${ttsRes.status}`);
+            }
+            const buf = Buffer.from(await ttsRes.arrayBuffer());
+            if (buf.byteLength < 256) {
+              throw new Error('TTS returned empty audio chunk');
+            }
+            buffers.push(buf);
+          }
+          audioChunks = buffers;
+          usedLang = tl;
+          break;
+        } catch {
+          // Try next fallback language code
+        }
+      }
+
+      if (!audioChunks || audioChunks.length === 0) {
+        res.status(502).json({ error: 'Free AI voice server temporarily unreachable.' });
+        return;
+      }
+
+      const combined = Buffer.concat(audioChunks);
+      res.json({
+        audioDataUrl: `data:audio/mpeg;base64,${combined.toString('base64')}`,
+        mimeType: 'audio/mpeg',
+        languageUsed: usedLang,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'TTS audio synthesis failed.';
+      res.status(500).json({ error: msg });
+    }
+  });
+
+  // 2d. AI Lip-Sync & Singing Photo SSE Endpoint (SadTalker / HallO / Wav2Lip)
+  app.post('/api/generate/lip-sync', async (req, res) => {
+    const { imageDataUrl, audioDataUrl, hfToken } = req.body as {
+      imageDataUrl?: string;
+      audioDataUrl?: string;
+      hfToken?: string;
+    };
+
+    if (!imageDataUrl || !audioDataUrl) {
+      res.status(400).json({ error: 'Portrait photo and audio track are both required.' });
+      return;
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    let aborted = false;
+    req.on('close', () => {
+      aborted = true;
+    });
+
+    const sendEvent = (payload: unknown) => {
+      if (aborted || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    sendEvent({
+      type: 'progress',
+      percent: 12,
+      message: 'Routing portrait + audio to Hugging Face Lip-Sync GPU...',
+    });
+
+    try {
+      await generateLipSyncVideo({
+        imageDataUrl,
+        audioDataUrl,
+        hfToken,
+        isAborted: () => aborted,
+        onEvent: (event) => {
+          sendEvent(event);
+        },
+      });
+    } catch (err) {
+      if (!aborted) {
+        sendEvent({
+          type: 'busy',
+          message: `Lip-Sync GPU busy (${
+            err instanceof Error ? err.message : 'Queue unavailable'
+          }) — switching to CineGen Smart Lip-Sync Animator...`,
+        });
+      }
+    } finally {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
   });
 
   // 3. Test custom Colab / Hugging Face backend URL reachability

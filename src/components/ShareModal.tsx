@@ -46,9 +46,13 @@ export function ShareModal({ item, onClose, onDownload }: ShareModalProps) {
       }
 
       if (blobToShare && navigator.canShare) {
-        const ext = item.kind === 'image' ? 'jpg' : 'webm';
+        const ext =
+          item.kind === 'image' ? 'jpg' : item.mimeType.includes('mp4') ? 'mp4' : 'webm';
         const file = new File([blobToShare], `jatt-cinegen-ai-${item.id}.${ext}`, {
-          type: blobToShare.type || item.mimeType || (item.kind === 'image' ? 'image/jpeg' : 'video/webm'),
+          type:
+            blobToShare.type ||
+            item.mimeType ||
+            (item.kind === 'image' ? 'image/jpeg' : 'video/webm'),
         });
         if (navigator.canShare({ files: [file] })) {
           shareData.files = [file];

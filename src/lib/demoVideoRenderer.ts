@@ -251,7 +251,7 @@ export async function renderDemoVideo({
   let sceneDescriptions: string[] | undefined;
 
   if (sourceImageDataUrl) {
-    onProgress(18, 'Preparing uploaded image for cinematic animation...', totalSeconds);
+    onProgress(18, 'Building 3D parallax depth layers from uploaded photo...', totalSeconds);
     const uploaded = await loadImageElement(sourceImageDataUrl, 10000, 16);
     sceneImages.push(uploaded);
   } else {
@@ -300,6 +300,32 @@ export async function renderDemoVideo({
   const fps = 30;
   const frameIntervalMs = 1000 / fps;
   const cachedVignette = createCachedGradeAndVignetteCanvas(width, height, style);
+
+  // Offscreen depth-separated background canvas for 3D Parallax Image-to-Video mode
+  let parallaxBgCanvas: HTMLCanvasElement | null = null;
+  if (sourceImageDataUrl && sceneImages[0]) {
+    parallaxBgCanvas = document.createElement('canvas');
+    parallaxBgCanvas.width = width;
+    parallaxBgCanvas.height = height;
+    const bgCtx = parallaxBgCanvas.getContext('2d');
+    if (bgCtx) {
+      const hero = sceneImages[0];
+      const imgAspect = hero.naturalWidth / Math.max(1, hero.naturalHeight);
+      const canvasAspect = width / height;
+      const bw = imgAspect > canvasAspect ? height * imgAspect : width;
+      const bh = imgAspect > canvasAspect ? height : width / imgAspect;
+      bgCtx.filter = 'blur(22px) brightness(0.65) saturate(1.12)';
+      bgCtx.drawImage(hero, (width - bw * 1.18) / 2, (height - bh * 1.18) / 2, bw * 1.18, bh * 1.18);
+      bgCtx.filter = 'none';
+    }
+  }
+
+  const promptLower = prompt.toLowerCase();
+  const hasWaterOrSkyCue = /water|ocean|sea|wave|river|cloud|sky|wind|rain|hair|mist|fog/.test(
+    promptLower
+  );
+  const hasWarmLightCue = /sun|sunset|fire|gold|glow|neon|cyberpunk|light|spark/.test(promptLower);
+
   const videoStream = canvas.captureStream(fps);
   const combinedTracks: MediaStreamTrack[] = [...videoStream.getVideoTracks()];
 
@@ -448,6 +474,76 @@ export async function renderDemoVideo({
               nextReused ? (nextIdx % 2 === 1 ? 0.035 : -0.03) : 0,
               nextReused ? 1.09 : 1
             );
+          }
+        } else if (parallaxBgCanvas) {
+          // 3D Parallax Motion Renderer: counter-moving atmospheric depth backdrop + floating foreground layer
+          const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+          const bgDriftX = (0.5 - ease) * width * 0.055;
+          const bgDriftY = Math.sin(t * Math.PI) * height * 0.025;
+          ctx.save();
+          ctx.translate(width / 2 - bgDriftX, height / 2 - bgDriftY);
+          ctx.scale(1.06 + t * 0.04, 1.06 + t * 0.04);
+          ctx.drawImage(parallaxBgCanvas, -width / 2, -height / 2, width, height);
+          ctx.restore();
+
+          // Soft feathered hero depth plane with independent camera parallax & micro-perspective sway
+          ctx.save();
+          const fgScale =
+            cameraMotion === 'dolly-push'
+              ? 1.04 + ease * 0.14
+              : 1.08 + Math.sin(t * Math.PI) * 0.06;
+          const fgShiftX =
+            cameraMotion === 'slow-pan'
+              ? (ease - 0.5) * width * 0.09
+              : Math.sin(t * Math.PI * 1.5) * width * 0.024;
+          const fgShiftY =
+            cameraMotion === 'crane-up'
+              ? (0.5 - ease) * height * 0.08
+              : Math.cos(t * Math.PI * 1.2) * height * 0.018;
+          const fgTilt = Math.sin(t * Math.PI * 2) * 0.008;
+
+          const hero = sceneImages[0];
+          const imgAspect = hero.naturalWidth / Math.max(1, hero.naturalHeight);
+          const canvasAspect = width / height;
+          const dw = imgAspect > canvasAspect ? height * imgAspect : width;
+          const dh = imgAspect > canvasAspect ? height : width / imgAspect;
+
+          ctx.translate(width / 2 + fgShiftX, height / 2 + fgShiftY);
+          ctx.rotate(fgTilt);
+          ctx.scale(fgScale, fgScale);
+          ctx.drawImage(hero, -dw / 2, -dh / 2, dw, dh);
+          ctx.restore();
+
+          // Subtle prompt-reactive atmospheric motion haze / water & wind shimmer
+          if (hasWaterOrSkyCue) {
+            const mistX = ((t * 0.85) % 1) * width;
+            const mist = ctx.createRadialGradient(
+              mistX,
+              height * 0.35,
+              width * 0.05,
+              mistX,
+              height * 0.35,
+              width * 0.48
+            );
+            mist.addColorStop(0, 'rgba(224, 242, 254, 0.08)');
+            mist.addColorStop(1, 'rgba(224, 242, 254, 0)');
+            ctx.fillStyle = mist;
+            ctx.fillRect(0, 0, width, height);
+          }
+
+          if (hasWarmLightCue) {
+            const flare = ctx.createRadialGradient(
+              width * (0.25 + t * 0.5),
+              height * 0.22,
+              0,
+              width * (0.25 + t * 0.5),
+              height * 0.22,
+              width * 0.5
+            );
+            flare.addColorStop(0, 'rgba(251, 191, 36, 0.11)');
+            flare.addColorStop(1, 'rgba(251, 191, 36, 0)');
+            ctx.fillStyle = flare;
+            ctx.fillRect(0, 0, width, height);
           }
         } else {
           drawKenBurnsImage(ctx, sceneImages[0], width, height, t, cameraMotion, 1);

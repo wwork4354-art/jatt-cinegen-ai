@@ -5,7 +5,9 @@ import {
   Film,
   Image as ImageIcon,
   Maximize2,
+  Mic,
   Share2,
+  Volume2,
   X,
 } from 'lucide-react';
 import type { UIStrings } from '../lib/i18n';
@@ -149,6 +151,8 @@ export function PreviewStage({
               <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 text-cyan-300">
                 {mode === 'text-to-image' ? (
                   <ImageIcon className="h-6 w-6" />
+                ) : mode === 'lip-sync' ? (
+                  <Mic className="h-6 w-6" />
                 ) : (
                   <Film className="h-6 w-6" />
                 )}
@@ -204,7 +208,7 @@ export function PreviewStage({
                   controls
                   autoPlay
                   loop
-                  muted
+                  muted={activeCreation.sourceMode !== 'lip-sync'}
                   playsInline
                   className="h-full w-full object-contain"
                 />
@@ -215,6 +219,13 @@ export function PreviewStage({
                 <div className="pointer-events-none absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-black/75 px-2.5 py-1 text-[11px] font-medium text-cyan-200 backdrop-blur-sm">
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                   <span>{activeCreation.engineLabel}</span>
+                </div>
+              )}
+
+              {activeCreation.sourceMode === 'lip-sync' && (
+                <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-black/75 px-2.5 py-1 text-[11px] font-medium text-cyan-200 backdrop-blur-sm">
+                  <Volume2 className="h-3.5 w-3.5 text-cyan-300" />
+                  <span>Audio Enabled</span>
                 </div>
               )}
             </div>
@@ -233,6 +244,8 @@ export function PreviewStage({
             >
               {mode === 'text-to-image' ? (
                 <ImageIcon className="h-7 w-7 text-slate-600" />
+              ) : mode === 'lip-sync' ? (
+                <Mic className="h-7 w-7 text-slate-600" />
               ) : (
                 <Film className="h-7 w-7 text-slate-600" />
               )}
@@ -241,10 +254,14 @@ export function PreviewStage({
               <h2 className="font-display text-lg font-semibold text-slate-200">
                 {mode === 'text-to-image'
                   ? strings.readyImageTitle
+                  : mode === 'lip-sync'
+                  ? 'Ready for Talking & Singing Photo'
                   : strings.readyVideoTitle}
               </h2>
               <p className="text-xs leading-relaxed text-slate-500">
-                {strings.readySubtitle}
+                {mode === 'lip-sync'
+                  ? 'Upload any portrait photo + song or typed speech in 15 languages to animate it for free.'
+                  : strings.readySubtitle}
               </p>
             </div>
           </div>
