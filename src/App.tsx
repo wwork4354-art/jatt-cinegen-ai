@@ -68,7 +68,7 @@ export default function App() {
   const [quality, setQuality] = useState<VideoQuality>('720p');
   const [voiceoverEnabled, setVoiceoverEnabled] = useState(false);
   const [backgroundMusicFile, setBackgroundMusicFile] = useState<File | null>(null);
-  const [videoSourceMode, setVideoSourceMode] = useState<VideoSourceMode>('demo');
+  const [videoSourceMode, setVideoSourceMode] = useState<VideoSourceMode>('hf-gpu');
   const [customBackendUrl, setCustomBackendUrl] = useState<string>(() => {
     try {
       return localStorage.getItem(CUSTOM_BACKEND_STORAGE_KEY) ?? '';
@@ -99,6 +99,7 @@ export default function App() {
   const [isLivePreviewActive, setIsLivePreviewActive] = useState(false);
   const [shareItem, setShareItem] = useState<CreationItem | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [gpuBusyNotice, setGpuBusyNotice] = useState<string | null>(null);
 
   const [progress, setProgress] = useState<GenerationProgress>({
     active: false,
@@ -240,12 +241,239 @@ export default function App() {
     }
   };
 
+  const runFastDemoReel = async (
+    trimmedPrompt: string,
+    targetMode: 'text-to-video' | 'image-to-video'
+  ) => {
+    setErrorMessage(null);
+    setGpuBusyNotice(null);
+    startTimer(
+      targetMode === 'text-to-video'
+        ? 'Generating AI Scenes via Pollinations AI...'
+        : 'Preparing uploaded image...'
+    );
+    try {
+      const result = await renderDemoVideo({
+        prompt: trimmedPrompt,
+        aspectRatio,
+        duration,
+        cameraMotion,
+        quality,
+        style: stylePreset,
+        sourceImageDataUrl:
+          targetMode === 'image-to-video' ? uploadedImageUrl ?? undefined : undefined,
+        backgroundMusicFile,
+        voiceoverEnabled,
+        speechLocale: langMeta.speechLocale,
+        voiceLanguageId,
+        onFrameCanvas: (sourceCanvas) => {
+          setIsLivePreviewActive((prev) => (prev ? prev : true));
+          const target = liveCanvasRef.current;
+          if (!target) return;
+          const maxPreviewSide = 1280;
+          const scale = Math.min(
+            1,
+            maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+          );
+          const previewW = Math.round(sourceCanvas.width * scale);
+          const previewH = Math.round(sourceCanvas.height * scale);
+          if (target.width !== previewW || target.height !== previewH) {
+            target.width = previewW;
+            target.height = previewH;
+          }
+          const tctx = target.getContext('2d');
+          if (tctx) {
+            tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
+          }
+        },
+        onProgress: (percent, statusMessage, remainingSeconds) => {
+          setProgress((prev) =>
+            prev.active
+              ? { ...prev, percent, statusMessage, remainingSeconds }
+              : prev
+          );
+        },
+      });
+
+      const qualityTag = quality === '4k' ? '4K Ultra HD' : quality;
+      const item: CreationItem = {
+        id: crypto.randomUUID(),
+        kind: 'video',
+        sourceMode: targetMode,
+        prompt: trimmedPrompt,
+        style: stylePreset,
+        aspectRatio,
+        width: result.width,
+        height: result.height,
+        duration,
+        cameraMotion,
+        quality,
+        engineLabel:
+          targetMode === 'text-to-video'
+            ? `Fast 3-Scene Reel (${qualityTag})`
+            : `CineGen ${qualityTag} Animate`,
+        scenes: result.scenes,
+        mediaUrl: result.mediaUrl,
+        mimeType: result.mimeType,
+        createdAt: Date.now(),
+        blob: result.blob,
+      };
+
+      await persistNewCreation(item);
+    } catch (err) {
+      setErrorMessage(err instanceof Error ? err.message : 'Video rendering failed.');
+    } finally {
+      stopTimer();
+      setIsLivePreviewActive(false);
+      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+    }
+  };
+
+  const runHfGpuVideo = async (
+    trimmedPrompt: string,
+    targetMode: 'text-to-video' | 'image-to-video'
+  ) => {
+    setErrorMessage(null);
+    setGpuBusyNotice(null);
+    startTimer('Connecting to Free AI Video GPU...');
+
+    try {
+      const { englishPrompt } = await translatePromptToEnglish(
+        trimmedPrompt,
+        voiceLanguageId
+      );
+      const effectivePrompt = englishPrompt || trimmedPrompt;
+
+      let imagePayload = uploadedImageUrl ?? undefined;
+      if (targetMode === 'image-to-video' && uploadedImageUrl?.startsWith('blob:')) {
+        const fetched = await fetch(uploadedImageUrl);
+        imagePayload = await blobToDataUrl(await fetched.blob());
+      }
+
+      const response = await fetch('/api/generate/hf-video', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: effectivePrompt,
+          mode: targetMode,
+          aspectRatio,
+          style: stylePreset,
+          imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
+        }),
+      });
+
+      if (!response.ok || !response.body) {
+        throw new Error('Free GPU queue is currently busy or unavailable.');
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split('\n');
+        buffer = lines.pop() ?? '';
+
+        for (const rawLine of lines) {
+          const line = rawLine.trim();
+          if (!line.startsWith('data:')) continue;
+          const jsonText = line.slice(5).trim();
+          if (!jsonText) continue;
+
+          const evt = JSON.parse(jsonText) as {
+            type: 'progress' | 'done' | 'busy';
+            percent?: number;
+            message: string;
+            providerLabel?: string;
+            videoApiPath?: string;
+            mimeType?: string;
+            width?: number;
+            height?: number;
+          };
+
+          if (evt.type === 'progress') {
+            setProgress((prev) =>
+              prev.active
+                ? {
+                    ...prev,
+                    percent: evt.percent ?? prev.percent,
+                    statusMessage: evt.message,
+                  }
+                : prev
+            );
+          } else if (evt.type === 'busy') {
+            setGpuBusyNotice(evt.message);
+            completed = true;
+          } else if (evt.type === 'done' && evt.videoApiPath) {
+            setProgress((prev) =>
+              prev.active
+                ? {
+                    ...prev,
+                    percent: 95,
+                    statusMessage: 'Preparing MP4 playback...',
+                  }
+                : prev
+            );
+
+            const mediaRes = await fetch(evt.videoApiPath);
+            if (!mediaRes.ok) {
+              throw new Error('Could not load generated MP4 from server.');
+            }
+            const blob = await mediaRes.blob();
+            const mediaUrl = URL.createObjectURL(blob);
+
+            const item: CreationItem = {
+              id: crypto.randomUUID(),
+              kind: 'video',
+              sourceMode: targetMode,
+              prompt: trimmedPrompt,
+              style: stylePreset,
+              aspectRatio,
+              width: evt.width ?? 704,
+              height: evt.height ?? 512,
+              duration,
+              cameraMotion,
+              quality,
+              engineLabel: evt.providerLabel || 'Free AI Video GPU',
+              mediaUrl,
+              mimeType: evt.mimeType || 'video/mp4',
+              createdAt: Date.now(),
+              blob,
+            };
+
+            await persistNewCreation(item);
+            completed = true;
+          }
+        }
+      }
+
+      if (!completed) {
+        setGpuBusyNotice('Free GPU busy — retrying or switch to Fast 3-Scene Reel');
+      }
+    } catch (err) {
+      setGpuBusyNotice(
+        err instanceof Error
+          ? err.message
+          : 'Free GPU busy — retrying or switch to Fast 3-Scene Reel'
+      );
+    } finally {
+      stopTimer();
+      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+    }
+  };
+
   const handleGenerate = async () => {
     if (activeTab === 'creations' || progress.active) return;
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
 
     setErrorMessage(null);
+    setGpuBusyNotice(null);
 
     // Direct frontend Multi-Provider Free AI Image Waterfall (blocks rate-limit/refusal banners)
     if (activeTab === 'text-to-image') {
@@ -296,83 +524,13 @@ export default function App() {
     }
 
     // Video generation (Text to Video OR Image to Video)
+    if (videoSourceMode === 'hf-gpu') {
+      await runHfGpuVideo(trimmedPrompt, activeTab);
+      return;
+    }
+
     if (videoSourceMode === 'demo') {
-      startTimer(
-        activeTab === 'text-to-video'
-          ? 'Generating AI Scenes via Pollinations AI...'
-          : 'Preparing uploaded image...'
-      );
-      try {
-        const result = await renderDemoVideo({
-          prompt: trimmedPrompt,
-          aspectRatio,
-          duration,
-          cameraMotion,
-          quality,
-          style: stylePreset,
-          sourceImageDataUrl: activeTab === 'image-to-video' ? uploadedImageUrl ?? undefined : undefined,
-          backgroundMusicFile,
-          voiceoverEnabled,
-          speechLocale: langMeta.speechLocale,
-          voiceLanguageId,
-          onFrameCanvas: (sourceCanvas) => {
-            setIsLivePreviewActive((prev) => (prev ? prev : true));
-            const target = liveCanvasRef.current;
-            if (!target) return;
-            const maxPreviewSide = 1280;
-            const scale = Math.min(1, maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height));
-            const previewW = Math.round(sourceCanvas.width * scale);
-            const previewH = Math.round(sourceCanvas.height * scale);
-            if (target.width !== previewW || target.height !== previewH) {
-              target.width = previewW;
-              target.height = previewH;
-            }
-            const tctx = target.getContext('2d');
-            if (tctx) {
-              tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
-            }
-          },
-          onProgress: (percent, statusMessage, remainingSeconds) => {
-            setProgress((prev) =>
-              prev.active
-                ? { ...prev, percent, statusMessage, remainingSeconds }
-                : prev
-            );
-          },
-        });
-
-        const qualityTag = quality === '4k' ? '4K Ultra HD' : quality;
-        const item: CreationItem = {
-          id: crypto.randomUUID(),
-          kind: 'video',
-          sourceMode: activeTab,
-          prompt: trimmedPrompt,
-          style: stylePreset,
-          aspectRatio,
-          width: result.width,
-          height: result.height,
-          duration,
-          cameraMotion,
-          quality,
-          engineLabel:
-            activeTab === 'text-to-video'
-              ? `Pollinations AI ${qualityTag}`
-              : `CineGen ${qualityTag} Animate`,
-          scenes: result.scenes,
-          mediaUrl: result.mediaUrl,
-          mimeType: result.mimeType,
-          createdAt: Date.now(),
-          blob: result.blob,
-        };
-
-        await persistNewCreation(item);
-      } catch (err) {
-        setErrorMessage(err instanceof Error ? err.message : 'Video rendering failed.');
-      } finally {
-        stopTimer();
-        setIsLivePreviewActive(false);
-        setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-      }
+      await runFastDemoReel(trimmedPrompt, activeTab);
       return;
     }
 
@@ -582,6 +740,7 @@ export default function App() {
     setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
     setActiveCreationId(null);
     setErrorMessage(null);
+    setGpuBusyNotice(null);
     if (activeTab === 'creations') {
       setActiveTab('text-to-video');
     }
@@ -599,6 +758,7 @@ export default function App() {
         activeTab={activeTab}
         onSelectTab={(tab) => {
           setErrorMessage(null);
+          setGpuBusyNotice(null);
           setActiveTab(tab);
         }}
         creationsCount={creations.length}
@@ -693,6 +853,22 @@ export default function App() {
                 isLivePreviewActive={isLivePreviewActive}
                 errorMessage={errorMessage}
                 onDismissError={() => setErrorMessage(null)}
+                gpuBusyNotice={gpuBusyNotice}
+                onDismissGpuBusy={() => setGpuBusyNotice(null)}
+                onRetryHfGpu={() => {
+                  const trimmed = prompt.trim();
+                  if (trimmed && (activeTab === 'text-to-video' || activeTab === 'image-to-video')) {
+                    void runHfGpuVideo(trimmed, activeTab);
+                  }
+                }}
+                onFallbackToReel={() => {
+                  const trimmed = prompt.trim();
+                  setVideoSourceMode('demo');
+                  setGpuBusyNotice(null);
+                  if (trimmed && (activeTab === 'text-to-video' || activeTab === 'image-to-video')) {
+                    void runFastDemoReel(trimmed, activeTab);
+                  }
+                }}
                 onDownload={handleDownload}
                 onShare={(item) => setShareItem(item)}
                 onAnimateImage={handleAnimateImage}

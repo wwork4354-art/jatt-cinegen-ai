@@ -375,7 +375,9 @@ export function PromptPanel({
     !isGenerating &&
     prompt.trim().length > 0 &&
     (mode !== 'image-to-video' || Boolean(uploadedImageUrl)) &&
-    (!isVideoMode || videoSourceMode === 'demo' || customBackendUrl.trim().length > 0);
+    (!isVideoMode ||
+      videoSourceMode !== 'custom-backend' ||
+      customBackendUrl.trim().length > 0);
 
   const heading =
     mode === 'text-to-image'
@@ -388,7 +390,11 @@ export function PromptPanel({
     mode === 'text-to-image'
       ? 'Generate Full HD images 100% free via Pollinations AI with zero key limits.'
       : mode === 'text-to-video'
-      ? 'Auto-generates sequential Pollinations AI scenes and renders a continuous 15s video in-browser.'
+      ? videoSourceMode === 'hf-gpu'
+        ? 'Generates real moving AI character/object MP4 videos via free keyless Hugging Face Video GPUs.'
+        : 'Auto-generates real AI & HD scenes and renders a continuous 15s video in-browser.'
+      : videoSourceMode === 'hf-gpu'
+      ? 'Upload any photo and animate subjects with real AI video motion via free Hugging Face GPUs.'
       : 'Upload any photo and animate it with smooth camera motion and optional audio.';
 
   return (
@@ -983,35 +989,71 @@ export function PromptPanel({
             </div>
           </div>
 
-          {/* Optional Advanced Custom Backend Toggle */}
+          {/* AI Video Engine Selector */}
           <div className="space-y-3 rounded-xl border border-white/10 bg-[#07090E]/75 p-3.5">
-            <div className="flex items-center justify-between gap-3">
-              <div className="space-y-0.5">
-                <div className="text-xs font-semibold tracking-wide text-slate-200">
-                  {videoSourceMode === 'demo'
-                    ? 'Free Unlimited Pollinations Engine (Active)'
-                    : 'Custom Backend API (Active)'}
-                </div>
-                <div className="text-[11px] text-slate-500">
-                  Works 100% free with zero API keys or credit limits.
-                </div>
+            <div className="space-y-0.5">
+              <div className="text-xs font-semibold tracking-wide text-slate-200">
+                AI Video Engine (100% Free, Zero Keys)
               </div>
+              <div className="text-[11px] text-slate-500">
+                {videoSourceMode === 'hf-gpu'
+                  ? 'Tries LTX-Video, Wan 2.1, CogVideoX-5B & Open-Sora public Hugging Face GPUs for real MP4 motion.'
+                  : videoSourceMode === 'demo'
+                  ? 'Fast in-browser 3-scene 15s cinema renderer for instant playback on 3GB RAM devices.'
+                  : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
               <button
                 type="button"
-                onClick={() =>
-                  onVideoSourceModeChange(
-                    videoSourceMode === 'demo' ? 'custom-backend' : 'demo'
-                  )
-                }
-                className={`rounded-lg border px-2.5 py-1.5 text-[11px] font-semibold whitespace-nowrap transition-colors ${
-                  videoSourceMode === 'custom-backend'
-                    ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                onClick={() => onVideoSourceModeChange('hf-gpu')}
+                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                  videoSourceMode === 'hf-gpu'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
                     : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
                 }`}
               >
-                {videoSourceMode === 'custom-backend'
-                  ? 'Use Free Default'
-                  : 'Custom Backend URL'}
+                <span className="text-[11px] font-semibold whitespace-nowrap">
+                  Free AI Video GPU
+                </span>
+                <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                  Real Motion MP4
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onVideoSourceModeChange('demo')}
+                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                  videoSourceMode === 'demo'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                    : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+                }`}
+              >
+                <span className="text-[11px] font-semibold whitespace-nowrap">
+                  Fast 3-Scene Reel
+                </span>
+                <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                  Instant 15s Render
+                </span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => onVideoSourceModeChange('custom-backend')}
+                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                  videoSourceMode === 'custom-backend'
+                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
+                    : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+                }`}
+              >
+                <span className="text-[11px] font-semibold whitespace-nowrap">
+                  Custom Backend URL
+                </span>
+                <span className="text-[10px] text-slate-400 whitespace-nowrap">
+                  Colab / FastAPI
+                </span>
               </button>
             </div>
 
@@ -1079,13 +1121,17 @@ export function PromptPanel({
             {strings.generateImageBtn}
           </>
         ) : mode === 'text-to-video' ? (
-          videoSourceMode === 'demo' ? (
+          videoSourceMode === 'hf-gpu' ? (
             strings.generateVideoBtn
+          ) : videoSourceMode === 'demo' ? (
+            'Generate Fast 3-Scene Reel'
           ) : (
             'Generate Video via Custom URL'
           )
-        ) : videoSourceMode === 'demo' ? (
+        ) : videoSourceMode === 'hf-gpu' ? (
           strings.animateBtn
+        ) : videoSourceMode === 'demo' ? (
+          'Animate with Fast Reel'
         ) : (
           'Animate via Custom URL'
         )}

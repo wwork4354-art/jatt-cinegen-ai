@@ -5,6 +5,7 @@ import {
   Film,
   Image as ImageIcon,
   Maximize2,
+  RotateCw,
   Share2,
   X,
 } from 'lucide-react';
@@ -31,6 +32,10 @@ interface PreviewStageProps {
   isLivePreviewActive: boolean;
   errorMessage: string | null;
   onDismissError: () => void;
+  gpuBusyNotice: string | null;
+  onDismissGpuBusy: () => void;
+  onRetryHfGpu: () => void;
+  onFallbackToReel: () => void;
   onDownload: (item: CreationItem) => void;
   onShare: (item: CreationItem) => void;
   onAnimateImage: (item: CreationItem) => void;
@@ -50,6 +55,10 @@ export function PreviewStage({
   isLivePreviewActive,
   errorMessage,
   onDismissError,
+  gpuBusyNotice,
+  onDismissGpuBusy,
+  onRetryHfGpu,
+  onFallbackToReel,
   onDownload,
   onShare,
   onAnimateImage,
@@ -101,6 +110,47 @@ export function PreviewStage({
           >
             <X className="h-4 w-4" />
           </button>
+        </div>
+      )}
+
+      {/* Free GPU Busy Banner with One-Click Retry or Fast 3-Scene Reel Switch */}
+      {gpuBusyNotice && !progress.active && (
+        <div
+          role="status"
+          className="mb-4 flex flex-col gap-3 rounded-xl border border-amber-400/35 bg-amber-500/10 px-4 py-3.5 text-sm text-amber-100 sm:flex-row sm:items-center sm:justify-between"
+        >
+          <div className="space-y-0.5 min-w-0">
+            <div className="font-semibold text-amber-200">
+              Free GPU busy — retrying or switch to Fast 3-Scene Reel
+            </div>
+            <p className="text-xs text-amber-200/80 break-words">{gpuBusyNotice}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onRetryHfGpu}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg border border-amber-300/40 bg-amber-400/15 px-3 py-1.5 text-xs font-semibold text-amber-100 hover:bg-amber-400/25 transition-colors"
+            >
+              <RotateCw className="h-3.5 w-3.5" />
+              Retry Free AI GPU
+            </button>
+            <button
+              type="button"
+              onClick={onFallbackToReel}
+              className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg bg-cyan-400 px-3 py-1.5 text-xs font-bold text-slate-950 hover:bg-cyan-300 transition-colors"
+            >
+              <Film className="h-3.5 w-3.5" />
+              Switch to Fast 3-Scene Reel
+            </button>
+            <button
+              type="button"
+              onClick={onDismissGpuBusy}
+              aria-label="Dismiss GPU queue notice"
+              className="rounded p-1 text-amber-300 hover:bg-amber-400/20"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
         </div>
       )}
 
@@ -306,7 +356,9 @@ export function PreviewStage({
             >
               <Download className="h-3.5 w-3.5" />
               {activeCreation.kind === 'video'
-                ? strings.downloadVideoBtn
+                ? activeCreation.mimeType.includes('mp4')
+                  ? 'Download MP4'
+                  : strings.downloadVideoBtn
                 : strings.downloadImageBtn}
             </button>
           </div>

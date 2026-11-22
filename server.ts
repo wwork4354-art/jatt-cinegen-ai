@@ -4,6 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  generateHfRealAiVideo,
+  getCachedHfVideo,
+  type HfAspectRatio,
+  type HfVideoMode,
+} from './server/hfVideoService.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -230,6 +236,122 @@ async function startServer() {
     }
   });
 
+  // 2. Real AI Motion Video via Free Keyless Hugging Face Gradio Spaces (SSE progress stream)
+  app.post('/api/generate/hf-video', async (req, res) => {
+    const { prompt, mode, aspectRatio, style, imageDataUrl } = req.body as {
+      prompt?: string;
+      mode?: HfVideoMode;
+      aspectRatio?: HfAspectRatio;
+      style?: StylePreset;
+      imageDataUrl?: string;
+    };
+
+    const cleanPrompt = (prompt || '').trim();
+    if (!cleanPrompt) {
+      res.status(400).json({ error: 'Prompt is required.' });
+      return;
+    }
+
+    const safeMode: HfVideoMode = mode === 'image-to-video' ? 'image-to-video' : 'text-to-video';
+    const safeRatio: HfAspectRatio =
+      aspectRatio === '9:16' || aspectRatio === '1:1' ? aspectRatio : '16:9';
+
+    const styleSuffix =
+      style === 'cinematic'
+        ? 'cinematic film lighting, dramatic motion, 4k sharp focus'
+        : style === 'anime'
+        ? 'theatrical anime animation, fluid motion, expressive lighting'
+        : style === '3d-render'
+        ? 'octane 3d animation, physically based materials, smooth fluid motion'
+        : style === 'realistic'
+        ? 'photorealistic live action footage, natural camera motion, sharp texture'
+        : '';
+
+    const fullPrompt = styleSuffix ? `${cleanPrompt}, ${styleSuffix}` : cleanPrompt;
+
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders?.();
+
+    let aborted = false;
+    req.on('close', () => {
+      aborted = true;
+    });
+
+    const sendEvent = (payload: unknown) => {
+      if (aborted || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    sendEvent({
+      type: 'progress',
+      percent: 10,
+      message: 'Connecting to Free AI Video GPU...',
+    });
+
+    try {
+      await generateHfRealAiVideo({
+        prompt: fullPrompt,
+        mode: safeMode,
+        aspectRatio: safeRatio,
+        imageDataUrl,
+        isAborted: () => aborted,
+        onEvent: (event) => {
+          sendEvent(event);
+        },
+      });
+    } catch (err) {
+      if (!aborted) {
+        sendEvent({
+          type: 'busy',
+          message: `Free GPU busy — retrying or switch to Fast 3-Scene Reel (${
+            err instanceof Error ? err.message : 'Queue unavailable'
+          })`,
+        });
+      }
+    } finally {
+      if (!res.writableEnded) {
+        res.end();
+      }
+    }
+  });
+
+  // 2b. Serve cached MP4 video with byte-range support for HTML5 <video> & direct download
+  app.get('/api/hf-video-file/:id', (req, res) => {
+    const entry = getCachedHfVideo(req.params.id);
+    if (!entry) {
+      res.status(404).send('Video expired or not found. Please generate again.');
+      return;
+    }
+
+    const total = entry.buffer.byteLength;
+    const rangeHeader = req.headers.range;
+
+    res.setHeader('Content-Type', entry.mimeType || 'video/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+    res.setHeader('Cache-Control', 'private, max-age=600');
+
+    if (rangeHeader) {
+      const match = rangeHeader.match(/bytes=(\d+)-(\d*)/);
+      if (match) {
+        const start = Number(match[1]);
+        const end = match[2] ? Math.min(Number(match[2]), total - 1) : total - 1;
+        if (start >= 0 && start < total && start <= end) {
+          res.status(206);
+          res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+          res.setHeader('Content-Length', String(end - start + 1));
+          res.end(entry.buffer.subarray(start, end + 1));
+          return;
+        }
+      }
+    }
+
+    res.status(200);
+    res.setHeader('Content-Length', String(total));
+    res.end(entry.buffer);
+  });
+
   // 3. Test custom Colab / Hugging Face backend URL reachability
   app.post('/api/check-backend', async (req, res) => {
     try {
@@ -300,7 +422,7 @@ async function startServer() {
         duration?: string;
         aspectRatio?: AspectRatio;
         cameraMotion?: string;
-        quality?: '1080p' | '720p';
+        quality?: '1080p' | '720p' | '4k';
         imageDataUrl?: string;
       };
 

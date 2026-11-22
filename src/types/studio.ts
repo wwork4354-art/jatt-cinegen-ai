@@ -23,7 +23,7 @@ export type CameraMotionId =
   | 'handheld-drift'
   | 'static';
 
-export type VideoSourceMode = 'demo' | 'custom-backend';
+export type VideoSourceMode = 'hf-gpu' | 'demo' | 'custom-backend';
 
 export interface StylePresetOption {
   id: StylePresetId;
