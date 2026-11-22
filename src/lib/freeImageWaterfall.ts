@@ -388,19 +388,19 @@ async function tryPollinationsKeyframe(params: {
   return null;
 }
 
-export async function fetchFastVideoKeyframesParallel(params: {
+export async function fetchThreeVideoKeyframesParallel(params: {
   basePrompt: string;
-  scenePrompts: [string, string];
+  scenePrompts: [string, string, string];
   aspectRatio: AspectRatio;
   style: StylePresetId;
   onStatus?: (msg: string) => void;
-}): Promise<[FastKeyframeResult, FastKeyframeResult]> {
+}): Promise<[FastKeyframeResult, FastKeyframeResult, FastKeyframeResult]> {
   const { basePrompt, scenePrompts, aspectRatio, style, onStatus } = params;
   const baseSeed = Math.floor(100000 + Math.random() * 8999999);
 
-  onStatus?.('Generating real AI scenes (15s multi-model timeout)...');
+  onStatus?.('Generating 3 distinct AI cinematic frames (Pollinations Flux & Turbo)...');
 
-  const [ai1, ai2] = await Promise.all([
+  const [ai1, ai2, ai3] = await Promise.all([
     tryPollinationsKeyframe({
       scenePrompt: scenePrompts[0],
       aspectRatio,
@@ -415,35 +415,63 @@ export async function fetchFastVideoKeyframesParallel(params: {
       seed: baseSeed + 137,
       preferTurboFirst: true,
     }),
+    tryPollinationsKeyframe({
+      scenePrompt: scenePrompts[2],
+      aspectRatio,
+      style,
+      seed: baseSeed + 293,
+      preferTurboFirst: false,
+    }),
   ]);
 
-  if (ai1 && ai2) {
-    return [ai1, ai2];
-  }
-  if (ai1 && !ai2) {
-    return [ai1, { img: ai1.img, objectUrl: ai1.objectUrl, isAiGenerated: true }];
-  }
-  if (!ai1 && ai2) {
-    return [{ img: ai2.img, objectUrl: ai2.objectUrl, isAiGenerated: true }, ai2];
+  const validAi = [ai1, ai2, ai3].filter((item): item is FastKeyframeResult => Boolean(item));
+  if (validAi.length === 3) {
+    return [validAi[0], validAi[1], validAi[2]];
   }
 
-  // Real HD Photographic Fallback (Zero Cartoon Line-Art): Wikimedia Commons + Curated HD Photos
-  onStatus?.('AI queue busy — loading real HD photography matching your prompt...');
-  const photos = await fetchRealPhotoFallbackList(basePrompt, aspectRatio, 2, onStatus);
-  if (photos.length >= 2) {
-    return [
-      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
-      { img: photos[1].img, objectUrl: photos[1].objectUrl, isAiGenerated: false },
-    ];
+  // Fill any missing slots using real HD photography matching prompt keywords (never show error banners)
+  const needed = 3 - validAi.length;
+  onStatus?.(
+    validAi.length > 0
+      ? 'Completing 3-scene storyboard with matching HD photography...'
+      : 'Loading 3 high-detail cinematic scenes matching your prompt...'
+  );
+  const photos = await fetchRealPhotoFallbackList(basePrompt, aspectRatio, needed, onStatus);
+  const photoFrames: FastKeyframeResult[] = photos.map((p) => ({
+    img: p.img,
+    objectUrl: p.objectUrl,
+    isAiGenerated: false,
+  }));
+
+  const combined = [...validAi, ...photoFrames];
+  if (combined.length >= 3) {
+    return [combined[0], combined[1], combined[2]];
   }
-  if (photos.length === 1) {
-    return [
-      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
-      { img: photos[0].img, objectUrl: photos[0].objectUrl, isAiGenerated: false },
-    ];
+  if (combined.length === 2) {
+    return [combined[0], combined[1], combined[0]];
+  }
+  if (combined.length === 1) {
+    return [combined[0], combined[0], combined[0]];
   }
 
   throw new Error(
     'Unable to load AI scenes or HD photography right now. Please check your internet connection and try again.'
   );
+}
+
+export async function fetchFastVideoKeyframesParallel(params: {
+  basePrompt: string;
+  scenePrompts: [string, string];
+  aspectRatio: AspectRatio;
+  style: StylePresetId;
+  onStatus?: (msg: string) => void;
+}): Promise<[FastKeyframeResult, FastKeyframeResult]> {
+  const [f1, f2] = await fetchThreeVideoKeyframesParallel({
+    basePrompt: params.basePrompt,
+    scenePrompts: [params.scenePrompts[0], params.scenePrompts[1], params.scenePrompts[0]],
+    aspectRatio: params.aspectRatio,
+    style: params.style,
+    onStatus: params.onStatus,
+  });
+  return [f1, f2];
 }

@@ -25,6 +25,12 @@ export type CameraMotionId =
 
 export type VideoSourceMode = 'hf-gpu' | 'demo' | 'custom-backend';
 
+export interface EngineVaultKeys {
+  geminiKey: string;
+  hfToken: string;
+  siliconFlowKey: string;
+}
+
 export interface StylePresetOption {
   id: StylePresetId;
   label: string;

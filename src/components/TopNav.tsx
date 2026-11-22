@@ -1,3 +1,4 @@
+import { KeyRound } from 'lucide-react';
 import type { UIStrings } from '../lib/i18n';
 import type { StudioTab } from '../types/studio';
 
@@ -6,6 +7,8 @@ interface TopNavProps {
   onSelectTab: (tab: StudioTab) => void;
   creationsCount: number;
   onResetWorkspace: () => void;
+  onOpenEngineVault: () => void;
+  configuredKeyCount: number;
   strings: UIStrings;
   developerAvatarUrl?: string | null;
 }
@@ -15,6 +18,8 @@ export function TopNav({
   onSelectTab,
   creationsCount,
   onResetWorkspace,
+  onOpenEngineVault,
+  configuredKeyCount,
   strings,
   developerAvatarUrl,
 }: TopNavProps) {
@@ -82,12 +87,28 @@ export function TopNav({
           })}
         </nav>
 
-        {/* Zone 3: Single Primary Action */}
-        <div className="flex items-center shrink-0">
+        {/* Zone 3: Engine Keys Vault & New Canvas */}
+        <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={onOpenEngineVault}
+            title="AI Engines & Free API Keys"
+            className="inline-flex min-h-[40px] items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-200 whitespace-nowrap shrink-0 transition-colors hover:border-cyan-400/60 hover:bg-cyan-400/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+          >
+            <KeyRound className="h-3.5 w-3.5 text-cyan-300" />
+            <span className="hidden sm:inline">AI Engines &amp; Keys</span>
+            <span className="sm:hidden">Engines</span>
+            {configuredKeyCount > 0 && (
+              <span className="rounded bg-cyan-400/25 px-1.5 py-0.5 text-[10px] font-mono text-cyan-100">
+                {configuredKeyCount}
+              </span>
+            )}
+          </button>
+
           <button
             type="button"
             onClick={onResetWorkspace}
-            className="min-h-[40px] rounded-lg border border-white/15 bg-white/[0.04] px-4 py-2 text-xs font-semibold text-slate-100 whitespace-nowrap shrink-0 transition-colors hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
+            className="min-h-[40px] rounded-lg border border-white/15 bg-white/[0.04] px-3.5 py-2 text-xs font-semibold text-slate-100 whitespace-nowrap shrink-0 transition-colors hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400"
           >
             {strings.newCanvas}
           </button>

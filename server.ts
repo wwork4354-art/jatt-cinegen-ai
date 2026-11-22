@@ -5,7 +5,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import {
-  generateHfRealAiVideo,
+  generateSmartMultiEngineVideo,
   getCachedHfVideo,
   type HfAspectRatio,
   type HfVideoMode,
@@ -236,15 +236,19 @@ async function startServer() {
     }
   });
 
-  // 2. Real AI Motion Video via Free Keyless Hugging Face Gradio Spaces (SSE progress stream)
+  // 2. Smart Multi-Engine Video Router (Veo -> SiliconFlow Wan 2.1 -> HF GPUs -> Keyless 3-Scene Backup)
   app.post('/api/generate/hf-video', async (req, res) => {
-    const { prompt, mode, aspectRatio, style, imageDataUrl } = req.body as {
-      prompt?: string;
-      mode?: HfVideoMode;
-      aspectRatio?: HfAspectRatio;
-      style?: StylePreset;
-      imageDataUrl?: string;
-    };
+    const { prompt, mode, aspectRatio, style, imageDataUrl, geminiKey, hfToken, siliconFlowKey } =
+      req.body as {
+        prompt?: string;
+        mode?: HfVideoMode;
+        aspectRatio?: HfAspectRatio;
+        style?: StylePreset;
+        imageDataUrl?: string;
+        geminiKey?: string;
+        hfToken?: string;
+        siliconFlowKey?: string;
+      };
 
     const cleanPrompt = (prompt || '').trim();
     if (!cleanPrompt) {
@@ -287,15 +291,18 @@ async function startServer() {
     sendEvent({
       type: 'progress',
       percent: 10,
-      message: 'Connecting to Free AI Video GPU...',
+      message: 'Initializing Smart Multi-Engine Video Router...',
     });
 
     try {
-      await generateHfRealAiVideo({
+      await generateSmartMultiEngineVideo({
         prompt: fullPrompt,
         mode: safeMode,
         aspectRatio: safeRatio,
         imageDataUrl,
+        geminiKey,
+        hfToken,
+        siliconFlowKey,
         isAborted: () => aborted,
         onEvent: (event) => {
           sendEvent(event);

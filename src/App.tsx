@@ -6,6 +6,7 @@ import { PreviewStage } from './components/PreviewStage';
 import { CreationsGallery } from './components/CreationsGallery';
 import { ShareModal } from './components/ShareModal';
 import { DeveloperFooter } from './components/DeveloperFooter';
+import { EngineVaultModal } from './components/EngineVaultModal';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import { renderDemoVideo } from './lib/demoVideoRenderer';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
@@ -16,6 +17,7 @@ import {
   type CameraMotionId,
   type CreationItem,
   type DeveloperProfile,
+  type EngineVaultKeys,
   type GenerationProgress,
   type StudioTab,
   type StylePresetId,
@@ -25,6 +27,8 @@ import {
 } from './types/studio';
 
 const CUSTOM_BACKEND_STORAGE_KEY = 'vesper_custom_video_backend_url';
+const HF_TOKEN_STORAGE_KEY = 'jatt_cinegen_hf_token';
+const ENGINE_VAULT_STORAGE_KEY = 'jatt_cinegen_engine_vault';
 const LANGUAGE_STORAGE_KEY = 'jatt_cinegen_language';
 const DEV_PROFILE_STORAGE_KEY = 'jatt_cinegen_developer_profile';
 const DEFAULT_CREATOR_AVATAR = '/creator-avatar.png';
@@ -76,6 +80,37 @@ export default function App() {
       return '';
     }
   });
+  const [hfToken, setHfToken] = useState<string>(() => {
+    try {
+      return (
+        localStorage.getItem(HF_TOKEN_STORAGE_KEY) ||
+        (import.meta.env.VITE_HF_TOKEN as string | undefined) ||
+        ''
+      );
+    } catch {
+      return '';
+    }
+  });
+  const [engineVaultKeys, setEngineVaultKeys] = useState<EngineVaultKeys>(() => {
+    const envGemini = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ?? '';
+    const envHf = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? '';
+    const envSf = (import.meta.env.VITE_SILICONFLOW_KEY as string | undefined) ?? '';
+    try {
+      const saved = localStorage.getItem(ENGINE_VAULT_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<EngineVaultKeys>;
+        return {
+          geminiKey: parsed.geminiKey || envGemini,
+          hfToken: parsed.hfToken || localStorage.getItem(HF_TOKEN_STORAGE_KEY) || envHf,
+          siliconFlowKey: parsed.siliconFlowKey || envSf,
+        };
+      }
+    } catch {
+      // Ignore parse error
+    }
+    return { geminiKey: envGemini, hfToken: envHf, siliconFlowKey: envSf };
+  });
+  const [isEngineVaultOpen, setIsEngineVaultOpen] = useState(false);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [developerProfile, setDeveloperProfile] = useState<DeveloperProfile>(() => {
     try {
@@ -99,7 +134,6 @@ export default function App() {
   const [isLivePreviewActive, setIsLivePreviewActive] = useState(false);
   const [shareItem, setShareItem] = useState<CreationItem | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [gpuBusyNotice, setGpuBusyNotice] = useState<string | null>(null);
 
   const [progress, setProgress] = useState<GenerationProgress>({
     active: false,
@@ -146,6 +180,22 @@ export default function App() {
       // Ignore storage quota errors
     }
   }, [customBackendUrl]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HF_TOKEN_STORAGE_KEY, hfToken);
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [hfToken]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(ENGINE_VAULT_STORAGE_KEY, JSON.stringify(engineVaultKeys));
+    } catch {
+      // Ignore storage quota errors
+    }
+  }, [engineVaultKeys]);
 
   useEffect(() => {
     try {
@@ -243,15 +293,27 @@ export default function App() {
 
   const runFastDemoReel = async (
     trimmedPrompt: string,
-    targetMode: 'text-to-video' | 'image-to-video'
+    targetMode: 'text-to-video' | 'image-to-video',
+    options?: { preserveTimer?: boolean; fallbackReason?: string }
   ) => {
     setErrorMessage(null);
-    setGpuBusyNotice(null);
-    startTimer(
-      targetMode === 'text-to-video'
-        ? 'Generating AI Scenes via Pollinations AI...'
-        : 'Preparing uploaded image...'
-    );
+    if (!options?.preserveTimer) {
+      startTimer(
+        targetMode === 'text-to-video'
+          ? 'Generating 3-Scene AI Cinematic Video...'
+          : 'Preparing uploaded image for cinematic animation...'
+      );
+    } else {
+      setProgress((prev) => ({
+        ...prev,
+        active: true,
+        percent: 16,
+        statusMessage:
+          options.fallbackReason ||
+          'Public GPUs at capacity — rendering 3-Scene AI Cinematic Video...',
+      }));
+    }
+
     try {
       const result = await renderDemoVideo({
         prompt: trimmedPrompt,
@@ -295,7 +357,6 @@ export default function App() {
         },
       });
 
-      const qualityTag = quality === '4k' ? '4K Ultra HD' : quality;
       const item: CreationItem = {
         id: crypto.randomUUID(),
         kind: 'video',
@@ -308,10 +369,7 @@ export default function App() {
         duration,
         cameraMotion,
         quality,
-        engineLabel:
-          targetMode === 'text-to-video'
-            ? `Fast 3-Scene Reel (${qualityTag})`
-            : `CineGen ${qualityTag} Animate`,
+        engineLabel: 'Rendered via CineGen Unlimited Engine',
         scenes: result.scenes,
         mediaUrl: result.mediaUrl,
         mimeType: result.mimeType,
@@ -334,8 +392,11 @@ export default function App() {
     targetMode: 'text-to-video' | 'image-to-video'
   ) => {
     setErrorMessage(null);
-    setGpuBusyNotice(null);
-    startTimer('Connecting to Free AI Video GPU...');
+    const activeHfToken = (engineVaultKeys.hfToken || hfToken).trim();
+    startTimer('Routing to best available AI Video Engine...');
+
+    let generatedRealMp4 = false;
+    let needsCinemaFallback = false;
 
     try {
       const { englishPrompt } = await translatePromptToEnglish(
@@ -359,112 +420,118 @@ export default function App() {
           aspectRatio,
           style: stylePreset,
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
+          geminiKey: engineVaultKeys.geminiKey.trim() || undefined,
+          hfToken: activeHfToken || undefined,
+          siliconFlowKey: engineVaultKeys.siliconFlowKey.trim() || undefined,
         }),
       });
 
       if (!response.ok || !response.body) {
-        throw new Error('Free GPU queue is currently busy or unavailable.');
-      }
+        needsCinemaFallback = true;
+      } else {
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let completed = false;
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
 
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() ?? '';
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line.startsWith('data:')) continue;
+            const jsonText = line.slice(5).trim();
+            if (!jsonText) continue;
 
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith('data:')) continue;
-          const jsonText = line.slice(5).trim();
-          if (!jsonText) continue;
-
-          const evt = JSON.parse(jsonText) as {
-            type: 'progress' | 'done' | 'busy';
-            percent?: number;
-            message: string;
-            providerLabel?: string;
-            videoApiPath?: string;
-            mimeType?: string;
-            width?: number;
-            height?: number;
-          };
-
-          if (evt.type === 'progress') {
-            setProgress((prev) =>
-              prev.active
-                ? {
-                    ...prev,
-                    percent: evt.percent ?? prev.percent,
-                    statusMessage: evt.message,
-                  }
-                : prev
-            );
-          } else if (evt.type === 'busy') {
-            setGpuBusyNotice(evt.message);
-            completed = true;
-          } else if (evt.type === 'done' && evt.videoApiPath) {
-            setProgress((prev) =>
-              prev.active
-                ? {
-                    ...prev,
-                    percent: 95,
-                    statusMessage: 'Preparing MP4 playback...',
-                  }
-                : prev
-            );
-
-            const mediaRes = await fetch(evt.videoApiPath);
-            if (!mediaRes.ok) {
-              throw new Error('Could not load generated MP4 from server.');
-            }
-            const blob = await mediaRes.blob();
-            const mediaUrl = URL.createObjectURL(blob);
-
-            const item: CreationItem = {
-              id: crypto.randomUUID(),
-              kind: 'video',
-              sourceMode: targetMode,
-              prompt: trimmedPrompt,
-              style: stylePreset,
-              aspectRatio,
-              width: evt.width ?? 704,
-              height: evt.height ?? 512,
-              duration,
-              cameraMotion,
-              quality,
-              engineLabel: evt.providerLabel || 'Free AI Video GPU',
-              mediaUrl,
-              mimeType: evt.mimeType || 'video/mp4',
-              createdAt: Date.now(),
-              blob,
+            const evt = JSON.parse(jsonText) as {
+              type: 'progress' | 'done' | 'busy';
+              percent?: number;
+              message: string;
+              providerLabel?: string;
+              videoApiPath?: string;
+              mimeType?: string;
+              width?: number;
+              height?: number;
             };
 
-            await persistNewCreation(item);
-            completed = true;
+            if (evt.type === 'progress') {
+              setProgress((prev) =>
+                prev.active
+                  ? {
+                      ...prev,
+                      percent: evt.percent ?? prev.percent,
+                      statusMessage: evt.message,
+                    }
+                  : prev
+              );
+            } else if (evt.type === 'busy') {
+              needsCinemaFallback = true;
+              break;
+            } else if (evt.type === 'done' && evt.videoApiPath) {
+              setProgress((prev) =>
+                prev.active
+                  ? {
+                      ...prev,
+                      percent: 95,
+                      statusMessage: 'Preparing MP4 playback...',
+                    }
+                  : prev
+              );
+
+              const mediaRes = await fetch(evt.videoApiPath);
+              if (!mediaRes.ok) {
+                needsCinemaFallback = true;
+                break;
+              }
+              const blob = await mediaRes.blob();
+              const mediaUrl = URL.createObjectURL(blob);
+
+              const item: CreationItem = {
+                id: crypto.randomUUID(),
+                kind: 'video',
+                sourceMode: targetMode,
+                prompt: trimmedPrompt,
+                style: stylePreset,
+                aspectRatio,
+                width: evt.width ?? 704,
+                height: evt.height ?? 512,
+                duration,
+                cameraMotion,
+                quality,
+                engineLabel: evt.providerLabel || 'Free AI Video GPU',
+                mediaUrl,
+                mimeType: evt.mimeType || 'video/mp4',
+                createdAt: Date.now(),
+                blob,
+              };
+
+              await persistNewCreation(item);
+              generatedRealMp4 = true;
+            }
           }
+
+          if (needsCinemaFallback || generatedRealMp4) break;
         }
       }
+    } catch {
+      needsCinemaFallback = true;
+    }
 
-      if (!completed) {
-        setGpuBusyNotice('Free GPU busy — retrying or switch to Fast 3-Scene Reel');
-      }
-    } catch (err) {
-      setGpuBusyNotice(
-        err instanceof Error
-          ? err.message
-          : 'Free GPU busy — retrying or switch to Fast 3-Scene Reel'
-      );
-    } finally {
+    if (generatedRealMp4) {
       stopTimer();
       setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+      return;
     }
+
+    // Automatically & smoothly render high-detail 3-Scene AI Cinematic Video with zero blocking errors
+    await runFastDemoReel(trimmedPrompt, targetMode, {
+      preserveTimer: true,
+      fallbackReason: 'Free GPU queue full — rendering 3-Scene AI Cinematic Video...',
+    });
   };
 
   const handleGenerate = async () => {
@@ -473,7 +540,6 @@ export default function App() {
     if (!trimmedPrompt) return;
 
     setErrorMessage(null);
-    setGpuBusyNotice(null);
 
     // Direct frontend Multi-Provider Free AI Image Waterfall (blocks rate-limit/refusal banners)
     if (activeTab === 'text-to-image') {
@@ -740,7 +806,6 @@ export default function App() {
     setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
     setActiveCreationId(null);
     setErrorMessage(null);
-    setGpuBusyNotice(null);
     if (activeTab === 'creations') {
       setActiveTab('text-to-video');
     }
@@ -748,6 +813,12 @@ export default function App() {
       setUploadedImageUrl(null);
     }
   }, [activeTab, stopTimer]);
+
+  const configuredKeyCount = [
+    engineVaultKeys.geminiKey.trim(),
+    (engineVaultKeys.hfToken || hfToken).trim(),
+    engineVaultKeys.siliconFlowKey.trim(),
+  ].filter(Boolean).length;
 
   return (
     <div
@@ -758,11 +829,12 @@ export default function App() {
         activeTab={activeTab}
         onSelectTab={(tab) => {
           setErrorMessage(null);
-          setGpuBusyNotice(null);
           setActiveTab(tab);
         }}
         creationsCount={creations.length}
         onResetWorkspace={handleResetWorkspace}
+        onOpenEngineVault={() => setIsEngineVaultOpen(true)}
+        configuredKeyCount={configuredKeyCount}
         strings={strings}
         developerAvatarUrl={developerProfile.avatarDataUrl}
       />
@@ -830,6 +902,12 @@ export default function App() {
                   onBackgroundMusicChange={setBackgroundMusicFile}
                   videoSourceMode={videoSourceMode}
                   onVideoSourceModeChange={setVideoSourceMode}
+                  hfToken={engineVaultKeys.hfToken || hfToken}
+                  onHfTokenChange={(nextToken) => {
+                    setHfToken(nextToken);
+                    setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
+                  }}
+                  onOpenEngineVault={() => setIsEngineVaultOpen(true)}
                   customBackendUrl={customBackendUrl}
                   onCustomBackendUrlChange={setCustomBackendUrl}
                   uploadedImageUrl={uploadedImageUrl}
@@ -853,22 +931,6 @@ export default function App() {
                 isLivePreviewActive={isLivePreviewActive}
                 errorMessage={errorMessage}
                 onDismissError={() => setErrorMessage(null)}
-                gpuBusyNotice={gpuBusyNotice}
-                onDismissGpuBusy={() => setGpuBusyNotice(null)}
-                onRetryHfGpu={() => {
-                  const trimmed = prompt.trim();
-                  if (trimmed && (activeTab === 'text-to-video' || activeTab === 'image-to-video')) {
-                    void runHfGpuVideo(trimmed, activeTab);
-                  }
-                }}
-                onFallbackToReel={() => {
-                  const trimmed = prompt.trim();
-                  setVideoSourceMode('demo');
-                  setGpuBusyNotice(null);
-                  if (trimmed && (activeTab === 'text-to-video' || activeTab === 'image-to-video')) {
-                    void runFastDemoReel(trimmed, activeTab);
-                  }
-                }}
                 onDownload={handleDownload}
                 onShare={(item) => setShareItem(item)}
                 onAnimateImage={handleAnimateImage}
@@ -951,6 +1013,22 @@ export default function App() {
         item={shareItem}
         onClose={() => setShareItem(null)}
         onDownload={handleDownload}
+      />
+
+      <EngineVaultModal
+        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${customBackendUrl}`}
+        isOpen={isEngineVaultOpen}
+        keys={{
+          ...engineVaultKeys,
+          hfToken: engineVaultKeys.hfToken || hfToken,
+        }}
+        customBackendUrl={customBackendUrl}
+        onSave={(nextKeys, nextBackendUrl) => {
+          setEngineVaultKeys(nextKeys);
+          setHfToken(nextKeys.hfToken);
+          setCustomBackendUrl(nextBackendUrl);
+        }}
+        onClose={() => setIsEngineVaultOpen(false)}
       />
 
       <DeveloperFooter

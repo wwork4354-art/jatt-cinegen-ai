@@ -1,5 +1,5 @@
 import { translatePromptToEnglish } from './voiceLanguages';
-import { fetchFastVideoKeyframesParallel } from './freeImageWaterfall';
+import { fetchThreeVideoKeyframesParallel } from './freeImageWaterfall';
 import {
   type AspectRatio,
   type CameraMotionId,
@@ -74,10 +74,11 @@ function loadImageElement(src: string, timeoutMs = 10000, minDimension = 16): Pr
   });
 }
 
-function buildFastTwoScenes(prompt: string): [string, string] {
+function buildThreeCinematicScenes(prompt: string): [string, string, string] {
   return [
     `Wide establishing cinematic opening shot: ${prompt}, dramatic atmospheric lighting, rich depth`,
-    `Dynamic action finale close-up in full motion: ${prompt}, vivid volumetric rim light, epic climax`,
+    `Dynamic mid-action tracking shot in motion: ${prompt}, volumetric rim light, golden particles`,
+    `Dramatic close-up finale hero frame: ${prompt}, glowing lens flare, epic cinema color grade`,
   ];
 }
 
@@ -250,11 +251,11 @@ export async function renderDemoVideo({
   let sceneDescriptions: string[] | undefined;
 
   if (sourceImageDataUrl) {
-    onProgress(12, 'Preparing uploaded image...', totalSeconds);
+    onProgress(18, 'Preparing uploaded image for cinematic animation...', totalSeconds);
     const uploaded = await loadImageElement(sourceImageDataUrl, 10000, 16);
     sceneImages.push(uploaded);
   } else {
-    onProgress(10, 'Generating real AI scenes (15s timeout)...', totalSeconds);
+    onProgress(16, 'Fetching 3 distinct AI scenes via Pollinations Flux/Turbo...', totalSeconds);
     // Race translation with a strict 2.5s timeout so prompt prep never stalls
     const translated = await Promise.race([
       translatePromptToEnglish(prompt, voiceLanguageId),
@@ -263,20 +264,21 @@ export async function renderDemoVideo({
       ),
     ]);
     const visualPrompt = translated.englishPrompt || prompt;
-    const fastScenes = buildFastTwoScenes(visualPrompt);
-    sceneDescriptions = fastScenes;
+    const threeScenes = buildThreeCinematicScenes(visualPrompt);
+    sceneDescriptions = threeScenes;
 
-    const [k1, k2] = await fetchFastVideoKeyframesParallel({
+    const [k1, k2, k3] = await fetchThreeVideoKeyframesParallel({
       basePrompt: visualPrompt,
-      scenePrompts: fastScenes,
+      scenePrompts: threeScenes,
       aspectRatio,
       style,
-      onStatus: (msg) => onProgress(22, msg, totalSeconds),
+      onStatus: (msg) => onProgress(26, msg, totalSeconds),
     });
 
-    sceneImages.push(k1.img, k2.img);
+    sceneImages.push(k1.img, k2.img, k3.img);
     tempObjectUrls.add(k1.objectUrl);
     tempObjectUrls.add(k2.objectUrl);
+    tempObjectUrls.add(k3.objectUrl);
   }
 
   const startPercent = 35;
@@ -369,9 +371,10 @@ export async function renderDemoVideo({
     fillStyle: idx % 6 === 0 ? 'rgba(165, 243, 252, 0.12)' : 'rgba(165, 243, 252, 0.2)',
   }));
 
-  const sceneMotions: [CameraMotionId, CameraMotionId] = [
+  const sceneMotions: [CameraMotionId, CameraMotionId, CameraMotionId] = [
     cameraMotion === 'static' ? 'dolly-push' : cameraMotion,
     cameraMotion === 'slow-pan' ? 'aerial-orbit' : 'slow-pan',
+    cameraMotion === 'crane-up' ? 'dolly-push' : 'crane-up',
   ];
 
   const recordingFinished = new Promise<Blob>((resolve, reject) => {
@@ -386,9 +389,9 @@ export async function renderDemoVideo({
 
   const startTime = performance.now();
   const totalMs = totalSeconds * 1000;
-  const crossfadeSec = 0.75;
-  const hasTwoScenes = sceneImages.length >= 2;
-  const splitSec = totalSeconds / 2;
+  const sceneCount = sceneImages.length;
+  const sceneDurationSec = totalSeconds / Math.max(1, sceneCount);
+  const crossfadeSec = Math.min(0.8, sceneDurationSec * 0.3);
 
   let lastFrameAt = 0;
   let lastProgressAt = 0;
@@ -409,12 +412,13 @@ export async function renderDemoVideo({
         ctx.fillStyle = '#07090E';
         ctx.fillRect(0, 0, width, height);
 
-        if (hasTwoScenes) {
-          const inScene2 = currentSec >= splitSec;
-          const sceneIdx = inScene2 ? 1 : 0;
-          const sceneElapsed = inScene2 ? currentSec - splitSec : currentSec;
-          const localT = Math.min(1, sceneElapsed / splitSec);
-          const reused = sceneImages[1] === sceneImages[0];
+        if (sceneCount >= 2) {
+          const sceneIdx = Math.min(sceneCount - 1, Math.floor(currentSec / sceneDurationSec));
+          const sceneStartSec = sceneIdx * sceneDurationSec;
+          const sceneElapsed = Math.max(0, currentSec - sceneStartSec);
+          const localT = Math.min(1, sceneElapsed / sceneDurationSec);
+          const motionA = sceneMotions[sceneIdx % sceneMotions.length];
+          const reused = sceneIdx > 0 && sceneImages[sceneIdx] === sceneImages[0];
 
           drawKenBurnsImage(
             ctx,
@@ -422,24 +426,27 @@ export async function renderDemoVideo({
             width,
             height,
             localT,
-            sceneMotions[sceneIdx],
+            motionA,
             1,
-            reused ? (sceneIdx === 1 ? 0.035 : -0.025) : 0,
-            reused && sceneIdx === 1 ? 1.09 : 1
+            reused ? (sceneIdx % 2 === 1 ? 0.035 : -0.03) : 0,
+            reused ? 1.09 : 1
           );
 
-          if (sceneIdx === 0 && currentSec > splitSec - crossfadeSec) {
-            const fadeT = (currentSec - (splitSec - crossfadeSec)) / crossfadeSec;
+          const nextIdx = sceneIdx + 1;
+          if (nextIdx < sceneCount && sceneElapsed > sceneDurationSec - crossfadeSec) {
+            const fadeT = (sceneElapsed - (sceneDurationSec - crossfadeSec)) / crossfadeSec;
+            const motionB = sceneMotions[nextIdx % sceneMotions.length];
+            const nextReused = sceneImages[nextIdx] === sceneImages[0];
             drawKenBurnsImage(
               ctx,
-              sceneImages[1],
+              sceneImages[nextIdx],
               width,
               height,
               0,
-              sceneMotions[1],
+              motionB,
               Math.min(1, Math.max(0, fadeT)),
-              reused ? 0.035 : 0,
-              reused ? 1.09 : 1
+              nextReused ? (nextIdx % 2 === 1 ? 0.035 : -0.03) : 0,
+              nextReused ? 1.09 : 1
             );
           }
         } else {

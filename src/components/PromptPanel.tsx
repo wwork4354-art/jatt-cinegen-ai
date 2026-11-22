@@ -2,15 +2,21 @@ import { useEffect, useRef, useState } from 'react';
 import {
   Camera,
   Check,
+  ChevronDown,
+  ChevronUp,
   Clock,
+  Eye,
+  EyeOff,
   Globe,
   ImagePlus,
+  KeyRound,
   Link2,
   Loader2,
   Mic,
   MicOff,
   Music,
   RotateCcw,
+  Settings2,
   SlidersHorizontal,
   Trash2,
   Upload,
@@ -64,6 +70,9 @@ interface PromptPanelProps {
   onBackgroundMusicChange: (file: File | null) => void;
   videoSourceMode: VideoSourceMode;
   onVideoSourceModeChange: (mode: VideoSourceMode) => void;
+  hfToken: string;
+  onHfTokenChange: (token: string) => void;
+  onOpenEngineVault: () => void;
   customBackendUrl: string;
   onCustomBackendUrlChange: (url: string) => void;
   uploadedImageUrl: string | null;
@@ -149,6 +158,9 @@ export function PromptPanel({
   onBackgroundMusicChange,
   videoSourceMode,
   onVideoSourceModeChange,
+  hfToken,
+  onHfTokenChange,
+  onOpenEngineVault,
   customBackendUrl,
   onCustomBackendUrlChange,
   uploadedImageUrl,
@@ -168,6 +180,8 @@ export function PromptPanel({
   const [interimTranscript, setInterimTranscript] = useState('');
   const [voiceStatusNote, setVoiceStatusNote] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [isEngineSettingsOpen, setIsEngineSettingsOpen] = useState(false);
+  const [showHfToken, setShowHfToken] = useState(false);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
     ok?: boolean;
@@ -989,18 +1003,48 @@ export function PromptPanel({
             </div>
           </div>
 
-          {/* AI Video Engine Selector */}
+          {/* Smart Multi-Engine Video Router Card + Engine Vault Button */}
           <div className="space-y-3 rounded-xl border border-white/10 bg-[#07090E]/75 p-3.5">
-            <div className="space-y-0.5">
-              <div className="text-xs font-semibold tracking-wide text-slate-200">
-                AI Video Engine (100% Free, Zero Keys)
+            <div className="flex items-start justify-between gap-2">
+              <div className="space-y-0.5 min-w-0">
+                <div className="text-xs font-semibold tracking-wide text-slate-200">
+                  Smart Multi-Engine Video Router
+                </div>
+                <div className="text-[11px] text-slate-500">
+                  {videoSourceMode === 'hf-gpu'
+                    ? 'Auto-routes Google Veo → Qwen Wan 2.1 / LTX-Video → CineGen Unlimited 3-Scene HD Reel.'
+                    : videoSourceMode === 'demo'
+                    ? 'Direct CineGen Unlimited Engine: 3 distinct AI frames + 30fps smooth motion.'
+                    : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
+                </div>
               </div>
-              <div className="text-[11px] text-slate-500">
-                {videoSourceMode === 'hf-gpu'
-                  ? 'Tries LTX-Video, Wan 2.1, CogVideoX-5B & Open-Sora public Hugging Face GPUs for real MP4 motion.'
-                  : videoSourceMode === 'demo'
-                  ? 'Fast in-browser 3-scene 15s cinema renderer for instant playback on 3GB RAM devices.'
-                  : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
+
+              <div className="flex items-center gap-1.5 shrink-0">
+                <button
+                  type="button"
+                  onClick={onOpenEngineVault}
+                  className="inline-flex items-center gap-1 rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2.5 py-1.5 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20 transition-colors"
+                >
+                  <KeyRound className="h-3 w-3" />
+                  <span>API Keys</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setIsEngineSettingsOpen((open) => !open)}
+                  aria-expanded={isEngineSettingsOpen || videoSourceMode === 'custom-backend'}
+                  className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
+                    isEngineSettingsOpen || videoSourceMode === 'custom-backend' || hfToken.trim()
+                      ? 'border-cyan-400/45 bg-cyan-400/10 text-cyan-200'
+                      : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
+                  }`}
+                >
+                  <Settings2 className="h-3.5 w-3.5" />
+                  {isEngineSettingsOpen || videoSourceMode === 'custom-backend' ? (
+                    <ChevronUp className="h-3.5 w-3.5" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5" />
+                  )}
+                </button>
               </div>
             </div>
 
@@ -1015,10 +1059,10 @@ export function PromptPanel({
                 }`}
               >
                 <span className="text-[11px] font-semibold whitespace-nowrap">
-                  Free AI Video GPU
+                  Smart Auto Router
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Real Motion MP4
+                  Veo · Wan 2.1 · Cinema
                 </span>
               </button>
 
@@ -1032,16 +1076,19 @@ export function PromptPanel({
                 }`}
               >
                 <span className="text-[11px] font-semibold whitespace-nowrap">
-                  Fast 3-Scene Reel
+                  3-Scene AI Reel
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Instant 15s Render
+                  Instant First-Click
                 </span>
               </button>
 
               <button
                 type="button"
-                onClick={() => onVideoSourceModeChange('custom-backend')}
+                onClick={() => {
+                  onVideoSourceModeChange('custom-backend');
+                  setIsEngineSettingsOpen(true);
+                }}
                 className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
                   videoSourceMode === 'custom-backend'
                     ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
@@ -1057,46 +1104,97 @@ export function PromptPanel({
               </button>
             </div>
 
-            {videoSourceMode === 'custom-backend' && (
-              <div className="space-y-2 border-t border-white/[0.08] pt-3">
-                <label
-                  htmlFor="custom-backend-url"
-                  className="flex items-center gap-1.5 text-xs font-medium text-slate-400"
-                >
-                  <Link2 className="h-3.5 w-3.5 text-cyan-400" />
-                  Custom Backend URL (Google Colab / Hugging Face / FastAPI)
-                </label>
-                <div className="flex items-center gap-2">
-                  <input
-                    id="custom-backend-url"
-                    type="url"
-                    value={customBackendUrl}
-                    onChange={(e) => {
-                      onCustomBackendUrlChange(e.target.value);
-                      setBackendStatus({ checking: false });
-                    }}
-                    placeholder="https://your-colab-tunnel.trycloudflare.com/generate"
-                    className="min-h-[40px] flex-1 rounded-lg border border-white/10 bg-[#0D1118] px-3 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleTestBackend}
-                    disabled={backendStatus.checking || !customBackendUrl.trim()}
-                    className="min-h-[40px] rounded-lg border border-white/15 bg-white/[0.04] px-3 py-2 text-xs font-medium text-slate-200 whitespace-nowrap hover:border-cyan-400/50 hover:text-cyan-200 disabled:opacity-40 transition-colors"
-                  >
-                    {backendStatus.checking ? 'Testing...' : 'Test URL'}
-                  </button>
+            {(isEngineSettingsOpen || videoSourceMode === 'custom-backend') && (
+              <div className="space-y-3.5 border-t border-white/[0.08] pt-3">
+                {/* Optional Free Hugging Face Token */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-hf-token"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                      Free Hugging Face Token (Optional - Faster Queue)
+                    </label>
+                    {hfToken.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => onHfTokenChange('')}
+                        className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-hf-token"
+                      type={showHfToken ? 'text' : 'password'}
+                      value={hfToken}
+                      onChange={(e) => onHfTokenChange(e.target.value)}
+                      placeholder="hf_... (optional free read token)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowHfToken((s) => !s)}
+                      aria-label={showHfToken ? 'Hide token' : 'Show token'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showHfToken ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Saved locally in your browser. Unlocks faster priority on CogVideoX-2B, LTX-Video &amp; HunyuanVideo when free quotas allow.
+                  </p>
                 </div>
 
-                {backendStatus.message && (
-                  <p
-                    className={`text-xs ${
-                      backendStatus.ok ? 'text-emerald-400' : 'text-amber-300'
-                    }`}
+                {/* Custom Backend URL */}
+                <div className="space-y-1.5">
+                  <label
+                    htmlFor="custom-backend-url"
+                    className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
                   >
-                    {backendStatus.message}
-                  </p>
-                )}
+                    <Link2 className="h-3.5 w-3.5 text-cyan-400" />
+                    Custom Backend URL (Google Colab / Hugging Face / FastAPI)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="custom-backend-url"
+                      type="url"
+                      value={customBackendUrl}
+                      onChange={(e) => {
+                        onCustomBackendUrlChange(e.target.value);
+                        setBackendStatus({ checking: false });
+                      }}
+                      placeholder="https://your-colab-tunnel.trycloudflare.com/generate"
+                      className="min-h-[38px] flex-1 rounded-lg border border-white/10 bg-[#0D1118] px-3 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleTestBackend}
+                      disabled={backendStatus.checking || !customBackendUrl.trim()}
+                      className="min-h-[38px] rounded-lg border border-white/15 bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-slate-200 whitespace-nowrap hover:border-cyan-400/50 hover:text-cyan-200 disabled:opacity-40 transition-colors"
+                    >
+                      {backendStatus.checking ? 'Testing...' : 'Test URL'}
+                    </button>
+                  </div>
+
+                  {backendStatus.message && (
+                    <p
+                      className={`text-xs ${
+                        backendStatus.ok ? 'text-emerald-400' : 'text-amber-300'
+                      }`}
+                    >
+                      {backendStatus.message}
+                    </p>
+                  )}
+                </div>
               </div>
             )}
           </div>
