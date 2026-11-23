@@ -1,5 +1,13 @@
 import { type AspectRatio, type VideoQuality } from '../types/studio';
-import { type RenderedVideoResult } from './demoVideoRenderer';
+
+export interface RenderedVideoResult {
+  blob: Blob;
+  mediaUrl: string;
+  mimeType: string;
+  width: number;
+  height: number;
+  scenes?: string[];
+}
 
 export interface RenderLipSyncParams {
   imageDataUrl: string;

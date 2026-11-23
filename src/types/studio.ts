@@ -28,12 +28,13 @@ export type CameraMotionId =
   | 'handheld-drift'
   | 'static';
 
-export type VideoSourceMode = 'hf-gpu' | 'demo' | 'custom-backend';
+export type VideoSourceMode = 'hf-gpu' | 'custom-backend';
 
 export interface EngineVaultKeys {
   geminiKey: string;
   hfToken: string;
   siliconFlowKey: string;
+  pollinationsKey?: string;
 }
 
 export interface StylePresetOption {

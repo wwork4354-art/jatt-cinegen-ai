@@ -336,6 +336,90 @@ async function tryDirectBrowserGoogleVeo(params: {
   throw new Error('Google Veo generation timed out');
 }
 
+async function tryDirectBrowserPollinationsVideo(params: {
+  prompt: string;
+  aspectRatio: AspectRatio;
+  imageDataUrl?: string;
+  pollinationsKey?: string;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { prompt, aspectRatio, imageDataUrl, pollinationsKey, onProgress } = params;
+  const width = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 768 : 1280;
+  const height = aspectRatio === '9:16' ? 1280 : aspectRatio === '1:1' ? 768 : 720;
+
+  const keyParam = pollinationsKey?.trim()
+    ? `&key=${encodeURIComponent(pollinationsKey.trim())}`
+    : '';
+  const imageParam =
+    imageDataUrl && (imageDataUrl.startsWith('http://') || imageDataUrl.startsWith('https://'))
+      ? `&image[0]=${encodeURIComponent(imageDataUrl)}`
+      : '';
+
+  const models = ['seedance-2.0', 'seedance-2.5-flash', 'wan-fast', 'wan', 'veo'];
+  let lastError = 'Pollinations.ai Video API unavailable';
+
+  for (let i = 0; i < models.length; i += 1) {
+    const model = models[i];
+    onProgress(16 + i * 5, `Generating real 5s MP4 via Pollinations.ai (${model})...`);
+    const url = `https://gen.pollinations.ai/video/${encodeURIComponent(
+      prompt
+    )}?model=${encodeURIComponent(model)}&duration=5&aspectRatio=${encodeURIComponent(
+      aspectRatio
+    )}${imageParam}${keyParam}`;
+
+    try {
+      const headers: Record<string, string> = {};
+      if (pollinationsKey?.trim()) {
+        headers.Authorization = `Bearer ${pollinationsKey.trim()}`;
+      }
+      const res = await withTimeout(
+        fetch(url, { headers }),
+        32000,
+        `Pollinations (${model})`
+      );
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const errJson = (await res.json()) as { error?: { message?: string } | string };
+          detail = typeof errJson.error === 'string' ? errJson.error : errJson.error?.message || '';
+        } catch {
+          // Ignore JSON parse errors
+        }
+        lastError = detail || `Pollinations Video (${model}) HTTP ${res.status}`;
+        if (res.status === 401 || res.status === 402 || res.status === 403) {
+          throw new Error(lastError);
+        }
+        continue;
+      }
+      const ctype = (res.headers.get('content-type') || '').toLowerCase();
+      if (!ctype.startsWith('video/') && !ctype.includes('octet-stream')) {
+        lastError = `Pollinations Video (${model}) returned ${ctype || 'non-video'}`;
+        continue;
+      }
+      const blob = await res.blob();
+      if (blob.size < 8000) {
+        lastError = `Pollinations Video (${model}) returned empty clip`;
+        continue;
+      }
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: ctype.startsWith('video/') ? ctype.split(';')[0] : 'video/mp4',
+        width,
+        height,
+        engineLabel: `Rendered via Pollinations.ai (${model})`,
+      };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : `Pollinations (${model}) failed`;
+      if (lastError.includes('HTTP 401') || lastError.includes('HTTP 402') || lastError.includes('HTTP 403')) {
+        throw new Error(lastError);
+      }
+    }
+  }
+
+  throw new Error(lastError);
+}
+
 export async function runDirectBrowserAiVideo(params: {
   prompt: string;
   mode: 'text-to-video' | 'image-to-video';
@@ -343,11 +427,34 @@ export async function runDirectBrowserAiVideo(params: {
   imageDataUrl?: string;
   geminiKey?: string;
   hfToken?: string;
+  pollinationsKey?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult | null> {
-  const { prompt, mode, aspectRatio, imageDataUrl, geminiKey, hfToken, onProgress } = params;
+  const {
+    prompt,
+    mode,
+    aspectRatio,
+    imageDataUrl,
+    geminiKey,
+    hfToken,
+    pollinationsKey,
+    onProgress,
+  } = params;
   const resolvedGemini = geminiKey?.trim() || '';
   const resolvedHf = hfToken?.trim() || '';
+
+  // 0. Pollinations.ai Video API (seedance -> wan -> veo)
+  try {
+    return await tryDirectBrowserPollinationsVideo({
+      prompt,
+      aspectRatio,
+      imageDataUrl: mode === 'image-to-video' ? imageDataUrl : undefined,
+      pollinationsKey,
+      onProgress,
+    });
+  } catch {
+    // Fall through to Google Veo / Hugging Face Gradio GPUs
+  }
 
   // 1. Google Veo 2.0
   if (resolvedGemini) {

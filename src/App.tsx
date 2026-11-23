@@ -8,7 +8,6 @@ import { ShareModal } from './components/ShareModal';
 import { DeveloperFooter } from './components/DeveloperFooter';
 import { EngineVaultModal } from './components/EngineVaultModal';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
-import { renderDemoVideo } from './lib/demoVideoRenderer';
 import {
   runDirectBrowserAiVideo,
   runDirectBrowserLipSync,
@@ -88,6 +87,10 @@ export default function App() {
   const envGemini = (import.meta.env.VITE_GEMINI_API_KEY as string | undefined) ?? '';
   const envHf = (import.meta.env.VITE_HF_TOKEN as string | undefined) ?? '';
   const envSf = (import.meta.env.VITE_SILICONFLOW_KEY as string | undefined) ?? '';
+  const envPollinations =
+    (import.meta.env.VITE_POLLINATIONS_KEY as string | undefined) ??
+    (import.meta.env.VITE_POLLINATIONS_API_KEY as string | undefined) ??
+    '';
 
   const [hfToken, setHfToken] = useState<string>(() => {
     try {
@@ -105,12 +108,18 @@ export default function App() {
           geminiKey: parsed.geminiKey || envGemini,
           hfToken: parsed.hfToken || localStorage.getItem(HF_TOKEN_STORAGE_KEY) || envHf,
           siliconFlowKey: parsed.siliconFlowKey || envSf,
+          pollinationsKey: parsed.pollinationsKey || envPollinations,
         };
       }
     } catch {
       // Ignore parse error
     }
-    return { geminiKey: envGemini, hfToken: envHf, siliconFlowKey: envSf };
+    return {
+      geminiKey: envGemini,
+      hfToken: envHf,
+      siliconFlowKey: envSf,
+      pollinationsKey: envPollinations,
+    };
   });
   const [isEngineVaultOpen, setIsEngineVaultOpen] = useState(false);
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
@@ -295,104 +304,6 @@ export default function App() {
     }
   };
 
-  const runFastDemoReel = async (
-    trimmedPrompt: string,
-    targetMode: 'text-to-video' | 'image-to-video',
-    options?: { preserveTimer?: boolean; fallbackReason?: string }
-  ) => {
-    setErrorMessage(null);
-    if (!options?.preserveTimer) {
-      startTimer(
-        targetMode === 'text-to-video'
-          ? 'Generating 3-Scene AI Cinematic Video...'
-          : 'Preparing uploaded image for cinematic animation...'
-      );
-    } else {
-      setProgress((prev) => ({
-        ...prev,
-        active: true,
-        percent: 16,
-        statusMessage:
-          options.fallbackReason ||
-          'Public GPUs at capacity — rendering 3-Scene AI Cinematic Video...',
-      }));
-    }
-
-    try {
-      const result = await renderDemoVideo({
-        prompt: trimmedPrompt,
-        aspectRatio,
-        duration,
-        cameraMotion,
-        quality,
-        style: stylePreset,
-        sourceImageDataUrl:
-          targetMode === 'image-to-video' ? uploadedImageUrl ?? undefined : undefined,
-        backgroundMusicFile,
-        voiceoverEnabled,
-        speechLocale: langMeta.speechLocale,
-        voiceLanguageId,
-        onFrameCanvas: (sourceCanvas) => {
-          setIsLivePreviewActive((prev) => (prev ? prev : true));
-          const target = liveCanvasRef.current;
-          if (!target) return;
-          const maxPreviewSide = 1280;
-          const scale = Math.min(
-            1,
-            maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
-          );
-          const previewW = Math.round(sourceCanvas.width * scale);
-          const previewH = Math.round(sourceCanvas.height * scale);
-          if (target.width !== previewW || target.height !== previewH) {
-            target.width = previewW;
-            target.height = previewH;
-          }
-          const tctx = target.getContext('2d');
-          if (tctx) {
-            tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
-          }
-        },
-        onProgress: (percent, statusMessage, remainingSeconds) => {
-          setProgress((prev) =>
-            prev.active
-              ? { ...prev, percent, statusMessage, remainingSeconds }
-              : prev
-          );
-        },
-      });
-
-      const item: CreationItem = {
-        id: crypto.randomUUID(),
-        kind: 'video',
-        sourceMode: targetMode,
-        prompt: trimmedPrompt,
-        style: stylePreset,
-        aspectRatio,
-        width: result.width,
-        height: result.height,
-        duration,
-        cameraMotion,
-        quality,
-        engineLabel:
-          targetMode === 'image-to-video'
-            ? 'Rendered via 3D Parallax Motion Engine'
-            : 'Rendered via CineGen Unlimited Engine',
-        scenes: result.scenes,
-        mediaUrl: result.mediaUrl,
-        mimeType: result.mimeType,
-        createdAt: Date.now(),
-        blob: result.blob,
-      };
-
-      await persistNewCreation(item);
-    } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : 'Video rendering failed.');
-    } finally {
-      stopTimer();
-      setIsLivePreviewActive(false);
-      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-    }
-  };
 
   const runLipSyncVideo = async (trimmedDialogue: string) => {
     if (!uploadedImageUrl) return;
@@ -684,16 +595,17 @@ export default function App() {
     const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
     const activeGeminiKey = (engineVaultKeys.geminiKey || envGemini).trim();
     const activeSiliconKey = (engineVaultKeys.siliconFlowKey || envSf).trim();
+    const activePollinationsKey = (engineVaultKeys.pollinationsKey || envPollinations).trim();
 
     startTimer(
       targetMode === 'image-to-video'
-        ? 'Sending photo to AI GPU for real motion...'
-        : 'Routing to best available AI Video Engine...'
+        ? 'Animating reference photo via Pollinations.ai Video API...'
+        : 'Generating real MP4 video via Pollinations.ai (seedance)...'
     );
 
     let generatedRealMp4 = false;
-    let needsCinemaFallback = false;
     let shouldTryDirectBrowser = false;
+    let busyReason = '';
     let imagePayload = uploadedImageUrl ?? undefined;
 
     try {
@@ -709,7 +621,7 @@ export default function App() {
       }
 
       const hfStreamAbort = new AbortController();
-      const hfStreamTimer = window.setTimeout(() => hfStreamAbort.abort(), 46000);
+      const hfStreamTimer = window.setTimeout(() => hfStreamAbort.abort(), 62000);
       try {
         const response = await fetch('/api/generate/hf-video', {
           method: 'POST',
@@ -725,6 +637,7 @@ export default function App() {
             geminiKey: activeGeminiKey || undefined,
             hfToken: activeHfToken || undefined,
             siliconFlowKey: activeSiliconKey || undefined,
+            pollinationsKey: activePollinationsKey || undefined,
           }),
         });
 
@@ -734,6 +647,7 @@ export default function App() {
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
           let buffer = '';
+          let streamDone = false;
 
           while (true) {
             const { value, done } = await reader.read();
@@ -771,7 +685,8 @@ export default function App() {
                     : prev
                 );
               } else if (evt.type === 'busy') {
-                needsCinemaFallback = true;
+                busyReason = evt.message;
+                streamDone = true;
                 break;
               } else if (evt.type === 'done' && evt.videoApiPath) {
                 window.clearTimeout(hfStreamTimer);
@@ -780,14 +695,15 @@ export default function App() {
                     ? {
                         ...prev,
                         percent: 95,
-                        statusMessage: 'Preparing MP4 playback...',
+                        statusMessage: 'Preparing real MP4 playback...',
                       }
                     : prev
                 );
 
                 const mediaRes = await fetch(evt.videoApiPath);
                 if (!mediaRes.ok) {
-                  needsCinemaFallback = true;
+                  busyReason = 'Could not stream generated MP4 video file.';
+                  streamDone = true;
                   break;
                 }
                 const blob = await mediaRes.blob();
@@ -800,12 +716,12 @@ export default function App() {
                   prompt: trimmedPrompt,
                   style: stylePreset,
                   aspectRatio,
-                  width: evt.width ?? 704,
-                  height: evt.height ?? 512,
+                  width: evt.width ?? 1280,
+                  height: evt.height ?? 720,
                   duration,
                   cameraMotion,
                   quality,
-                  engineLabel: evt.providerLabel || 'Free AI Video GPU',
+                  engineLabel: evt.providerLabel || 'Rendered via Pollinations.ai Video',
                   mediaUrl,
                   mimeType: evt.mimeType || 'video/mp4',
                   createdAt: Date.now(),
@@ -817,13 +733,12 @@ export default function App() {
               }
             }
 
-            if (needsCinemaFallback || generatedRealMp4) break;
+            if (streamDone || generatedRealMp4) break;
           }
         }
       } catch {
-        // If backend SSE timed out at 29s, go straight to fast 16fps fallback instead of repeating HF queues
         if (hfStreamAbort.signal.aborted) {
-          needsCinemaFallback = true;
+          busyReason = 'Video generation timed out after 60 seconds. Please retry.';
         } else {
           shouldTryDirectBrowser = true;
         }
@@ -831,7 +746,7 @@ export default function App() {
         window.clearTimeout(hfStreamTimer);
       }
 
-      // Direct Browser @gradio/client + Google Veo REST fallback (handles Vercel static deployments where /api/* returns 404)
+      // Direct Browser Pollinations / Veo / Gradio fallback (handles Vercel static deployments where /api/* returns 404)
       if (!generatedRealMp4 && shouldTryDirectBrowser) {
         const directResult = await runDirectBrowserAiVideo({
           prompt: effectivePrompt,
@@ -840,6 +755,7 @@ export default function App() {
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
           geminiKey: activeGeminiKey,
           hfToken: activeHfToken,
+          pollinationsKey: activePollinationsKey,
           onProgress: (percent, statusMessage) => {
             setProgress((prev) =>
               prev.active ? { ...prev, percent, statusMessage } : prev
@@ -871,24 +787,21 @@ export default function App() {
           generatedRealMp4 = true;
         }
       }
-    } catch {
-      needsCinemaFallback = true;
-    }
 
-    if (generatedRealMp4) {
+      if (!generatedRealMp4) {
+        setErrorMessage(
+          busyReason ||
+            'Could not generate a real MP4 video right now. Add an optional Pollinations Key (VITE_POLLINATIONS_KEY) or Hugging Face Token in API Keys and retry.'
+        );
+      }
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Real MP4 video generation failed.'
+      );
+    } finally {
       stopTimer();
       setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
-      return;
     }
-
-    // Final backup: 3D Parallax Motion Engine (image-to-video) or 3-Scene AI Reel (text-to-video)
-    await runFastDemoReel(trimmedPrompt, targetMode, {
-      preserveTimer: true,
-      fallbackReason:
-        targetMode === 'image-to-video'
-          ? 'GPU queue full — rendering 3D Parallax Motion Engine...'
-          : 'Free GPU queue full — rendering 3-Scene AI Cinematic Video...',
-    });
   };
 
   const handleGenerate = async () => {
@@ -952,14 +865,9 @@ export default function App() {
       return;
     }
 
-    // Video generation (Text to Video OR Image to Video)
+    // Real AI Video generation (Text to Video OR Image to Video)
     if (videoSourceMode === 'hf-gpu') {
       await runHfGpuVideo(trimmedPrompt, activeTab);
-      return;
-    }
-
-    if (videoSourceMode === 'demo') {
-      await runFastDemoReel(trimmedPrompt, activeTab);
       return;
     }
 
@@ -1182,6 +1090,7 @@ export default function App() {
     (engineVaultKeys.geminiKey || envGemini).trim(),
     (engineVaultKeys.hfToken || hfToken || envHf).trim(),
     (engineVaultKeys.siliconFlowKey || envSf).trim(),
+    (engineVaultKeys.pollinationsKey || envPollinations).trim(),
   ].filter(Boolean).length;
 
   return (

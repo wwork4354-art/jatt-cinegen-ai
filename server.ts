@@ -8,6 +8,7 @@ import {
   generateLipSyncVideo,
   generateSmartMultiEngineVideo,
   getCachedHfVideo,
+  getCachedRefImage,
   type HfAspectRatio,
   type HfVideoMode,
 } from './server/hfVideoService.ts';
@@ -304,10 +305,22 @@ async function startServer() {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
+    const proto =
+      (typeof req.headers['x-forwarded-proto'] === 'string'
+        ? req.headers['x-forwarded-proto'].split(',')[0].trim()
+        : req.protocol) || 'https';
+    const hostHeader =
+      (typeof req.headers['x-forwarded-host'] === 'string'
+        ? req.headers['x-forwarded-host'].split(',')[0].trim()
+        : req.headers.host) || '';
+    const publicOrigin = hostHeader && !hostHeader.includes('localhost') && !hostHeader.includes('127.0.0.1')
+      ? `${proto}://${hostHeader}`
+      : undefined;
+
     sendEvent({
       type: 'progress',
       percent: 10,
-      message: 'Routing to active AI Video Inference Endpoints (45s limit)...',
+      message: 'Generating real MP4 via Pollinations.ai Video API...',
     });
 
     let routeTimer: NodeJS.Timeout | undefined;
@@ -315,8 +328,8 @@ async function startServer() {
       const routeTimeout = new Promise<never>((_, reject) => {
         routeTimer = setTimeout(() => {
           aborted = true;
-          reject(new Error('45-second inference timeout reached'));
-        }, 45000);
+          reject(new Error('60-second video generation timeout reached'));
+        }, 60000);
       });
 
       await Promise.race([
@@ -326,6 +339,7 @@ async function startServer() {
           aspectRatio: safeRatio,
           duration: safeDuration,
           imageDataUrl,
+          publicOrigin,
           geminiKey,
           hfToken,
           siliconFlowKey,
@@ -342,9 +356,10 @@ async function startServer() {
         aborted = false;
         sendEvent({
           type: 'busy',
-          message: `Free inference busy (${
-            err instanceof Error ? err.message : '45s timeout'
-          }) — switching to fast stitched 16fps fallback...`,
+          message:
+            err instanceof Error
+              ? err.message
+              : 'Video API endpoints timed out. Please add a Pollinations or Hugging Face key in API Keys and retry.',
         });
       }
     } finally {
@@ -353,6 +368,19 @@ async function startServer() {
         res.end();
       }
     }
+  });
+
+  // 2a. Serve temporary reference photo for Pollinations image[0] Image-to-Video requests
+  app.get('/api/hf-video-ref/:id', (req, res) => {
+    const entry = getCachedRefImage(req.params.id);
+    if (!entry) {
+      res.status(404).send('Reference image expired.');
+      return;
+    }
+    res.setHeader('Content-Type', entry.mimeType || 'image/png');
+    res.setHeader('Content-Length', String(entry.buffer.byteLength));
+    res.setHeader('Cache-Control', 'public, max-age=600');
+    res.end(entry.buffer);
   });
 
   // 2b. Serve cached MP4 video with byte-range support for HTML5 <video> & direct download

@@ -20,8 +20,9 @@ export function EngineVaultModal({
   const [draftGeminiKey, setDraftGeminiKey] = useState(keys.geminiKey);
   const [draftHfToken, setDraftHfToken] = useState(keys.hfToken);
   const [draftSiliconFlowKey, setDraftSiliconFlowKey] = useState(keys.siliconFlowKey);
+  const [draftPollinationsKey, setDraftPollinationsKey] = useState(keys.pollinationsKey ?? '');
   const [draftBackendUrl, setDraftBackendUrl] = useState(customBackendUrl);
-  const [visibleField, setVisibleField] = useState<'gemini' | 'hf' | 'sf' | null>(null);
+  const [visibleField, setVisibleField] = useState<'gemini' | 'hf' | 'sf' | 'pollinations' | null>(null);
 
   if (!isOpen) return null;
 
@@ -31,6 +32,7 @@ export function EngineVaultModal({
         geminiKey: draftGeminiKey.trim(),
         hfToken: draftHfToken.trim(),
         siliconFlowKey: draftSiliconFlowKey.trim(),
+        pollinationsKey: draftPollinationsKey.trim(),
       },
       draftBackendUrl.trim()
     );
@@ -74,9 +76,9 @@ export function EngineVaultModal({
         <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/[0.05] px-3.5 py-2.5 text-[11px] text-cyan-100/90 flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 shrink-0 text-cyan-400" />
           <span>
-            Never-Stop Waterfall: <strong className="text-white">Google Veo 2.0</strong> →{' '}
-            <strong className="text-white">LTX-Video · Wan 2.1 · SVD · SadTalker</strong> →{' '}
-            <strong className="text-cyan-300">CineGen Unlimited Engine</strong>
+            Real MP4 Video Router: <strong className="text-white">Pollinations.ai (seedance · wan · veo)</strong> →{' '}
+            <strong className="text-white">Google Veo 2.0</strong> →{' '}
+            <strong className="text-cyan-300">LTX-Video · Wan 2.1 · SVD</strong>
           </span>
         </div>
 
@@ -184,20 +186,45 @@ export function EngineVaultModal({
             </div>
           </div>
 
-          {/* 4. Pollinations AI Keyless Unlimited Engine */}
-          <div className="flex items-center justify-between rounded-xl border border-emerald-400/25 bg-emerald-500/10 px-3.5 py-2.5">
-            <div className="space-y-0.5">
-              <div className="text-xs font-semibold text-emerald-200 flex items-center gap-1.5">
+          {/* 4. Pollinations.ai Video API Key (Optional VITE_POLLINATIONS_KEY) */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="vault-pollinations-key"
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-200"
+              >
                 <Sparkles className="h-3.5 w-3.5 text-emerald-300" />
-                4. Pollinations AI Keyless Unlimited Engine
-              </div>
-              <div className="text-[11px] text-emerald-200/75">
-                3-Scene Flux/Turbo + 30fps HD Motion Renderer (final automatic backup)
-              </div>
+                4. Pollinations.ai Video Key (VITE_POLLINATIONS_KEY)
+              </label>
+              <span className="text-[10px] font-mono text-slate-400">
+                {draftPollinationsKey.trim() ? 'Active' : 'seedance · wan · veo'}
+              </span>
             </div>
-            <span className="rounded-md bg-emerald-400/20 px-2 py-1 text-[10px] font-bold text-emerald-200 border border-emerald-400/35 whitespace-nowrap">
-              ALWAYS ON
-            </span>
+            <div className="relative flex items-center">
+              <input
+                id="vault-pollinations-key"
+                type={visibleField === 'pollinations' ? 'text' : 'password'}
+                value={draftPollinationsKey}
+                onChange={(e) => setDraftPollinationsKey(e.target.value)}
+                placeholder="pk_... or sk_... (optional enter.pollinations.ai key)"
+                autoComplete="off"
+                className="min-h-[40px] w-full rounded-lg border border-white/10 bg-[#07090E] pl-3 pr-10 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+              />
+              <button
+                type="button"
+                onClick={() =>
+                  setVisibleField((v) => (v === 'pollinations' ? null : 'pollinations'))
+                }
+                aria-label="Toggle Pollinations key visibility"
+                className="absolute right-2 rounded p-1 text-slate-400 hover:text-white"
+              >
+                {visibleField === 'pollinations' ? (
+                  <EyeOff className="h-3.5 w-3.5" />
+                ) : (
+                  <Eye className="h-3.5 w-3.5" />
+                )}
+              </button>
+            </div>
           </div>
 
           {/* Optional Custom Backend Endpoint */}
@@ -226,6 +253,7 @@ export function EngineVaultModal({
               setDraftGeminiKey('');
               setDraftHfToken('');
               setDraftSiliconFlowKey('');
+              setDraftPollinationsKey('');
               setDraftBackendUrl('');
             }}
             className="text-xs font-medium text-slate-400 hover:text-rose-300 transition-colors"

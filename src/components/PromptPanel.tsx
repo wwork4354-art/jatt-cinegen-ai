@@ -444,12 +444,8 @@ export function PromptPanel({
       : mode === 'lip-sync'
       ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face Lip-Sync GPUs with instant Animator backup.'
       : mode === 'text-to-video'
-      ? videoSourceMode === 'hf-gpu'
-        ? 'Generates real moving AI character/object MP4 videos via free keyless Hugging Face Video GPUs.'
-        : 'Auto-generates real AI & HD scenes and renders a continuous 15s video in-browser.'
-      : videoSourceMode === 'hf-gpu'
-      ? 'Upload any photo and animate subjects with real AI video motion or 3D Parallax Motion.'
-      : 'Upload any photo and animate it with 3D parallax depth motion and optional audio.';
+      ? 'Generates real moving AI MP4 videos via Pollinations.ai Video API (seedance, wan, veo) & Hugging Face GPUs.'
+      : 'Upload any reference photo and animate real character & scene motion via Pollinations image[0] & LTX-Video.';
 
   return (
     <section
@@ -1054,11 +1050,7 @@ export function PromptPanel({
               ))}
             </div>
             <p className="text-[11px] leading-snug text-cyan-300/80">
-              {duration === '5s'
-                ? 'Fast 5s clip @ 16fps (80 frames) — fastest Wan2.1 / LTX / CogVideoX GPU turnaround.'
-                : duration === '10s'
-                ? '10s @ 16fps (2×5s seamlessly stitched clips) with automatic fast fallback under 45s.'
-                : '15s @ 16fps (3×5s seamlessly stitched clips, 240 frames) with automatic fast fallback under 45s.'}
+              Streams real moving MP4 video via Pollinations.ai Video API (seedance → wan → veo) with active Hugging Face GPU fallback.
             </p>
           </div>
 
@@ -1218,9 +1210,7 @@ export function PromptPanel({
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {videoSourceMode === 'hf-gpu'
-                    ? 'Auto-routes Google Veo → Qwen Wan 2.1 / LTX-Video → CineGen Unlimited 3-Scene HD Reel.'
-                    : videoSourceMode === 'demo'
-                    ? 'Direct CineGen Unlimited Engine: fast 16fps stitched 5s AI clips + smooth motion.'
+                    ? 'Auto-routes Pollinations.ai Video (seedance → wan → veo) → Google Veo → LTX-Video / Wan 2.1 MP4.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>
@@ -1254,38 +1244,21 @@ export function PromptPanel({
               </div>
             </div>
 
-            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+            <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
               <button
                 type="button"
                 onClick={() => onVideoSourceModeChange('hf-gpu')}
-                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors ${
                   videoSourceMode === 'hf-gpu'
                     ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
                     : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
                 }`}
               >
                 <span className="text-[11px] font-semibold whitespace-nowrap">
-                  Smart Auto Router
+                  Pollinations &amp; AI Video APIs
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Veo · Wan 2.1 · Cinema
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => onVideoSourceModeChange('demo')}
-                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
-                  videoSourceMode === 'demo'
-                    ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
-                    : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
-                }`}
-              >
-                <span className="text-[11px] font-semibold whitespace-nowrap">
-                  3-Scene AI Reel
-                </span>
-                <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Instant First-Click
+                  seedance · wan · veo · LTX
                 </span>
               </button>
 
@@ -1295,7 +1268,7 @@ export function PromptPanel({
                   onVideoSourceModeChange('custom-backend');
                   setIsEngineSettingsOpen(true);
                 }}
-                className={`flex flex-col items-start rounded-lg border px-2.5 py-2 text-left transition-colors ${
+                className={`flex flex-col items-start rounded-lg border px-3 py-2 text-left transition-colors ${
                   videoSourceMode === 'custom-backend'
                     ? 'border-cyan-400 bg-cyan-400/15 text-cyan-200'
                     : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
@@ -1432,15 +1405,11 @@ export function PromptPanel({
         ) : mode === 'text-to-video' ? (
           videoSourceMode === 'hf-gpu' ? (
             strings.generateVideoBtn
-          ) : videoSourceMode === 'demo' ? (
-            'Generate Fast 3-Scene Reel'
           ) : (
             'Generate Video via Custom URL'
           )
         ) : videoSourceMode === 'hf-gpu' ? (
           strings.animateBtn
-        ) : videoSourceMode === 'demo' ? (
-          'Animate with 3D Parallax Reel'
         ) : (
           'Animate via Custom URL'
         )}
