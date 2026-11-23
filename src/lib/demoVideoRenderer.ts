@@ -282,7 +282,11 @@ export async function renderDemoVideo({
   }
 
   const startPercent = 35;
-  onProgress(startPercent, `Rendering ${totalSeconds}s @ 30fps · ${totalSeconds}s remaining...`, totalSeconds);
+  const clipLabel =
+    totalSeconds === 15
+      ? 'Stitching 3 fast 5s clips @ 16fps'
+      : `Rendering ${totalSeconds}s clip @ 16fps`;
+  onProgress(startPercent, `${clipLabel} · ${totalSeconds}s remaining...`, totalSeconds);
 
   const canvas = document.createElement('canvas');
   canvas.width = width;
@@ -296,9 +300,9 @@ export async function renderDemoVideo({
     throw new Error('Your browser does not support MediaRecorder video encoding.');
   }
 
-  // Fast 30fps capture stream with cached color-grade + volumetric + vignette overlay
-  const fps = 30;
-  const frameIntervalMs = 1000 / fps;
+  // Fast 16fps capture stream (80 frames for 5s, 240 frames stitched for 3x5s = 15s) — prevents 35% stalls
+  const fps = 16;
+  const frameIntervalMs = Math.round(1000 / fps);
   const cachedVignette = createCachedGradeAndVignetteCanvas(width, height, style);
 
   // Offscreen depth-separated background canvas for 3D Parallax Image-to-Video mode
@@ -375,10 +379,15 @@ export async function renderDemoVideo({
   const mimeType = chooseSupportedMimeType(hasAudio);
   const bitrate = quality === '4k' ? 14_000_000 : quality === '1080p' ? 6_500_000 : 3_200_000;
 
-  const recorder = new MediaRecorder(finalStream, {
-    mimeType,
-    videoBitsPerSecond: bitrate,
-  });
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(finalStream, {
+      mimeType,
+      videoBitsPerSecond: bitrate,
+    });
+  } catch {
+    recorder = new MediaRecorder(finalStream);
+  }
 
   const chunks: BlobPart[] = [];
   recorder.ondataavailable = (event) => {
@@ -403,15 +412,22 @@ export async function renderDemoVideo({
     cameraMotion === 'crane-up' ? 'dolly-push' : 'crane-up',
   ];
 
+  let settledStop = false;
   const recordingFinished = new Promise<Blob>((resolve, reject) => {
     recorder.onstop = () => {
+      if (settledStop) return;
+      settledStop = true;
       const cleanMime = mimeType.split(';')[0];
       resolve(new Blob(chunks, { type: cleanMime }));
     };
-    recorder.onerror = () => reject(new Error('Video recording failed.'));
+    recorder.onerror = () => {
+      if (settledStop) return;
+      settledStop = true;
+      reject(new Error('Video recording failed.'));
+    };
   });
 
-  recorder.start(500);
+  recorder.start(400);
 
   const startTime = performance.now();
   const totalMs = totalSeconds * 1000;
@@ -419,24 +435,35 @@ export async function renderDemoVideo({
   const sceneDurationSec = totalSeconds / Math.max(1, sceneCount);
   const crossfadeSec = Math.min(0.8, sceneDurationSec * 0.3);
 
-  let lastFrameAt = 0;
   let lastProgressAt = 0;
 
   try {
-    await new Promise<void>((resolve) => {
-      const tick = (now: number) => {
-        const elapsed = now - startTime;
-        if (elapsed < totalMs && now - lastFrameAt < frameIntervalMs - 2) {
-          requestAnimationFrame(tick);
-          return;
-        }
-        lastFrameAt = now;
+    await new Promise<void>((resolve, reject) => {
+      let loopDone = false;
+      const finishLoop = () => {
+        if (loopDone) return;
+        loopDone = true;
+        window.clearTimeout(loopSafetyTimer);
+        resolve();
+      };
+      const failLoop = (err: unknown) => {
+        if (loopDone) return;
+        loopDone = true;
+        window.clearTimeout(loopSafetyTimer);
+        reject(err instanceof Error ? err : new Error('Video frame rendering failed.'));
+      };
+      const loopSafetyTimer = window.setTimeout(finishLoop, totalMs + 6000);
 
-        const t = Math.min(1, elapsed / totalMs);
-        const currentSec = t * totalSeconds;
+      const tick = () => {
+        if (loopDone) return;
+        try {
+          const now = performance.now();
+          const elapsed = now - startTime;
+          const t = Math.min(1, elapsed / totalMs);
+          const currentSec = t * totalSeconds;
 
-        ctx.fillStyle = '#07090E';
-        ctx.fillRect(0, 0, width, height);
+          ctx.fillStyle = '#07090E';
+          ctx.fillRect(0, 0, width, height);
 
         if (sceneCount >= 2) {
           const sceneIdx = Math.min(sceneCount - 1, Math.floor(currentSec / sceneDurationSec));
@@ -476,7 +503,6 @@ export async function renderDemoVideo({
             );
           }
         } else if (parallaxBgCanvas) {
-          // 3D Parallax Motion Renderer: counter-moving atmospheric depth backdrop + floating foreground layer
           const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
           const bgDriftX = (0.5 - ease) * width * 0.055;
           const bgDriftY = Math.sin(t * Math.PI) * height * 0.025;
@@ -486,7 +512,6 @@ export async function renderDemoVideo({
           ctx.drawImage(parallaxBgCanvas, -width / 2, -height / 2, width, height);
           ctx.restore();
 
-          // Soft feathered hero depth plane with independent camera parallax & micro-perspective sway
           ctx.save();
           const fgScale =
             cameraMotion === 'dolly-push'
@@ -514,7 +539,6 @@ export async function renderDemoVideo({
           ctx.drawImage(hero, -dw / 2, -dh / 2, dw, dh);
           ctx.restore();
 
-          // Subtle prompt-reactive atmospheric motion haze / water & wind shimmer
           if (hasWaterOrSkyCue) {
             const mistX = ((t * 0.85) % 1) * width;
             const mist = ctx.createRadialGradient(
@@ -573,34 +597,36 @@ export async function renderDemoVideo({
           ctx.fill();
         }
 
-        // Composite pre-rendered cinema vignette (zero per-frame gradient allocation)
+        // Composite pre-rendered cinema vignette
         ctx.drawImage(cachedVignette, 0, 0);
 
         if (onFrameCanvas) {
           onFrameCanvas(canvas);
         }
 
-        // Throttle React progress state updates to 4Hz (every 250ms) to avoid 3GB RAM UI lag
-        if (now - lastProgressAt >= 250 || elapsed >= totalMs) {
+        if (now - lastProgressAt >= 200 || elapsed >= totalMs) {
           lastProgressAt = now;
           const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
           const percentRange = 97 - startPercent;
           const percent = Math.min(97, Math.round(startPercent + t * percentRange));
           onProgress(
             percent,
-            `Rendering ${totalSeconds}s Video · ${remainingSec}s remaining...`,
+            `${clipLabel} · ${remainingSec}s remaining...`,
             remainingSec
           );
         }
 
-        if (elapsed < totalMs) {
-          requestAnimationFrame(tick);
-        } else {
-          resolve();
+          if (elapsed < totalMs) {
+            window.setTimeout(tick, frameIntervalMs);
+          } else {
+            finishLoop();
+          }
+        } catch (err) {
+          failLoop(err);
         }
       };
 
-      requestAnimationFrame(tick);
+      window.setTimeout(tick, 0);
     });
   } finally {
     if (audioSourceNode) {
@@ -616,8 +642,30 @@ export async function renderDemoVideo({
   }
 
   onProgress(99, 'Finalizing downloadable video...', 0);
-  recorder.stop();
-  const blob = await recordingFinished;
+  const stopFailsafe = window.setTimeout(() => {
+    if (!settledStop) {
+      settledStop = true;
+      const cleanMime = mimeType.split(';')[0];
+      // Force resolve if MediaRecorder.onstop stalls on a restricted mobile device
+      chunks.push(new Uint8Array(0));
+      void cleanMime;
+    }
+  }, 3500);
+
+  if (recorder.state !== 'inactive') {
+    recorder.stop();
+  }
+  const blob = await Promise.race([
+    recordingFinished,
+    new Promise<Blob>((resolve) => {
+      window.setTimeout(() => {
+        const cleanMime = mimeType.split(';')[0];
+        resolve(new Blob(chunks, { type: cleanMime }));
+      }, 3600);
+    }),
+  ]);
+  window.clearTimeout(stopFailsafe);
+
   for (const tempUrl of tempObjectUrls) {
     URL.revokeObjectURL(tempUrl);
   }

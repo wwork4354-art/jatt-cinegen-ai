@@ -1053,11 +1053,13 @@ export function PromptPanel({
                 </button>
               ))}
             </div>
-            {mode === 'text-to-video' && duration === '15s' && (
-              <p className="text-[11px] leading-snug text-cyan-300/80">
-                Generates real AI scenes (with HD photographic backup) and renders a 15s 30fps video.
-              </p>
-            )}
+            <p className="text-[11px] leading-snug text-cyan-300/80">
+              {duration === '5s'
+                ? 'Fast 5s clip @ 16fps (80 frames) — fastest Wan2.1 / LTX / CogVideoX GPU turnaround.'
+                : duration === '10s'
+                ? '10s @ 16fps (2×5s seamlessly stitched clips) with automatic fast fallback under 45s.'
+                : '15s @ 16fps (3×5s seamlessly stitched clips, 240 frames) with automatic fast fallback under 45s.'}
+            </p>
           </div>
 
           {/* 4K / HD Quality Export Selector */}
@@ -1218,7 +1220,7 @@ export function PromptPanel({
                   {videoSourceMode === 'hf-gpu'
                     ? 'Auto-routes Google Veo → Qwen Wan 2.1 / LTX-Video → CineGen Unlimited 3-Scene HD Reel.'
                     : videoSourceMode === 'demo'
-                    ? 'Direct CineGen Unlimited Engine: 3 distinct AI frames + 30fps smooth motion.'
+                    ? 'Direct CineGen Unlimited Engine: fast 16fps stitched 5s AI clips + smooth motion.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>

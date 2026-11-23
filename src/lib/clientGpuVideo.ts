@@ -90,6 +90,8 @@ async function runBrowserGradioJob(params: {
   hfToken?: string;
   existingClient?: Client;
   initialMessage: string;
+  quickQueueTimeoutMs?: number;
+  jobTimeoutMs?: number;
   onProgress: (percent: number, message: string) => void;
 }): Promise<Blob> {
   const {
@@ -100,6 +102,8 @@ async function runBrowserGradioJob(params: {
     hfToken,
     existingClient,
     initialMessage,
+    quickQueueTimeoutMs = hfToken?.trim() ? 13000 : 8000,
+    jobTimeoutMs = 24000,
     onProgress,
   } = params;
 
@@ -109,52 +113,98 @@ async function runBrowserGradioJob(params: {
     existingClient ??
     (await withTimeout(
       opts ? Client.connect(spaceId, opts) : Client.connect(spaceId),
-      12000,
+      7500,
       `Connect ${label}`
     ));
 
-  onProgress(30, `Submitting task to ${label} GPU...`);
-  const submission = client.submit(endpoint, payload);
+  onProgress(28, `Submitting fast clip to ${label} GPU...`);
+  const submission = client.submit(endpoint, payload) as AsyncIterable<Record<string, unknown>> & {
+    cancel?: () => Promise<void> | void;
+  };
 
-  const hasToken = Boolean(hfToken?.trim());
-  const quickQueueTimeoutMs = hasToken ? 25000 : 12000;
-  const jobTimeoutMs = 95000;
   const startedAt = Date.now();
   let hasStartedGenerating = false;
-  let resultData: unknown = null;
+  let lastPercent = 30;
+  let settled = false;
 
-  for await (const rawMsg of submission as AsyncIterable<Record<string, unknown>>) {
-    const elapsed = Date.now() - startedAt;
+  const resultData = await new Promise<unknown>((resolve, reject) => {
+    let watchdogTimer: number | undefined;
 
-    if (!hasStartedGenerating && elapsed > quickQueueTimeoutMs) {
-      throw new Error(`${label} queue busy`);
-    }
-    if (elapsed > jobTimeoutMs) {
-      throw new Error(`${label} GPU timed out`);
-    }
+    const cleanup = () => {
+      settled = true;
+      if (watchdogTimer !== undefined) window.clearInterval(watchdogTimer);
+    };
 
-    if (rawMsg.type === 'status') {
-      const stage = String(rawMsg.stage || '');
-      const msgText = typeof rawMsg.message === 'string' ? rawMsg.message : '';
-      if (stage === 'error') {
-        throw new Error(msgText || `${label} returned an error`);
+    const abortJob = (reason: string) => {
+      if (settled) return;
+      cleanup();
+      try {
+        void Promise.resolve(submission.cancel?.()).catch(() => {});
+      } catch {
+        // Ignore cancel error
       }
-      if (typeof rawMsg.eta === 'number' && rawMsg.eta > (hasToken ? 90 : 45)) {
-        throw new Error(`${label} wait too long (~${Math.round(rawMsg.eta)}s)`);
+      reject(new Error(reason));
+    };
+
+    watchdogTimer = window.setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      if (!hasStartedGenerating && elapsed > quickQueueTimeoutMs) {
+        abortJob(`${label} queue busy`);
+        return;
       }
-      if (stage === 'generating') {
-        hasStartedGenerating = true;
-        onProgress(60, `Generating real AI motion frames via ${label}...`);
-      } else if (typeof rawMsg.position === 'number' && rawMsg.position > 0) {
-        onProgress(38, `${label} GPU Queue (#${rawMsg.position})...`);
-      } else {
-        onProgress(42, `Running AI model on ${label}...`);
+      if (elapsed > jobTimeoutMs) {
+        abortJob(`${label} GPU timeout`);
+        return;
       }
-    } else if (rawMsg.type === 'data') {
-      resultData = rawMsg.data;
-      break;
-    }
-  }
+      lastPercent = Math.min(hasStartedGenerating ? 82 : 44, lastPercent + 2);
+      onProgress(
+        lastPercent,
+        hasStartedGenerating
+          ? `Generating fast 16fps clip via ${label}...`
+          : `Checking ${label} GPU (${Math.round(elapsed / 1000)}s)...`
+      );
+    }, 1500);
+
+    (async () => {
+      try {
+        for await (const rawMsg of submission) {
+          if (settled) break;
+          if (rawMsg.type === 'status') {
+            const stage = String(rawMsg.stage || '');
+            const msgText = typeof rawMsg.message === 'string' ? rawMsg.message : '';
+            if (stage === 'error') {
+              abortJob(msgText || `${label} returned an error`);
+              return;
+            }
+            if (typeof rawMsg.eta === 'number' && rawMsg.eta > 35) {
+              abortJob(`${label} queue wait too long (~${Math.round(rawMsg.eta)}s)`);
+              return;
+            }
+            if (stage === 'generating') {
+              hasStartedGenerating = true;
+              lastPercent = Math.max(lastPercent, 58);
+              onProgress(lastPercent, `Generating real AI motion via ${label}...`);
+            } else if (typeof rawMsg.position === 'number' && rawMsg.position > 0) {
+              lastPercent = Math.max(lastPercent, 36);
+              onProgress(lastPercent, `${label} GPU Queue (#${rawMsg.position})...`);
+            } else {
+              lastPercent = Math.max(lastPercent, 38);
+              onProgress(lastPercent, `Running AI model on ${label}...`);
+            }
+          } else if (rawMsg.type === 'data') {
+            cleanup();
+            resolve(rawMsg.data);
+            return;
+          }
+        }
+        if (!settled) {
+          abortJob(`${label} finished without output`);
+        }
+      } catch (err) {
+        abortJob(err instanceof Error ? err.message : `${label} stream error`);
+      }
+    })();
+  });
 
   const videoUrl = extractGradioVideoUrl(resultData);
   if (!videoUrl) {
@@ -162,7 +212,7 @@ async function runBrowserGradioJob(params: {
   }
 
   onProgress(88, `Downloading generated MP4 from ${label}...`);
-  const mediaRes = await withTimeout(fetch(videoUrl), 30000, `Download MP4 from ${label}`);
+  const mediaRes = await withTimeout(fetch(videoUrl), 25000, `Download MP4 from ${label}`);
   if (!mediaRes.ok) {
     throw new Error(`Failed to fetch video output (HTTP ${mediaRes.status})`);
   }
@@ -315,35 +365,156 @@ export async function runDirectBrowserAiVideo(params: {
     }
   }
 
-  const width = aspectRatio === '9:16' ? 512 : aspectRatio === '1:1' ? 512 : 704;
-  const height = aspectRatio === '9:16' ? 704 : 512;
+  const width = aspectRatio === '9:16' ? 384 : aspectRatio === '1:1' ? 512 : 640;
+  const height = aspectRatio === '9:16' ? 640 : aspectRatio === '1:1' ? 512 : 384;
   const imageBlob =
     mode === 'image-to-video' && imageDataUrl ? await resolveInputBlob(imageDataUrl) : null;
+  const routerDeadline = Date.now() + 26000;
 
   if (mode === 'image-to-video' && imageBlob) {
     // Attempt A: Lightricks/ltx-video-distilled (/image_to_video)
+    if (Date.now() <= routerDeadline) {
+      try {
+        const blob = await runBrowserGradioJob({
+          spaceId: 'Lightricks/ltx-video-distilled',
+          label: 'LTX-Video Distilled',
+          endpoint: '/image_to_video',
+          initialMessage: 'Sending photo to AI GPU for fast 16fps motion...',
+          payload: {
+            prompt,
+            negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
+            input_image_filepath: handle_file(imageBlob),
+            input_video_filepath: null,
+            height_ui: height,
+            width_ui: width,
+            mode: 'image-to-video',
+            duration_ui: 2,
+            ui_frames_to_use: 9,
+            seed_ui: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+            ui_guidance_scale: 1,
+            improve_texture_flag: false,
+          },
+          hfToken: resolvedHf,
+          quickQueueTimeoutMs: 11000,
+          jobTimeoutMs: 22000,
+          onProgress,
+        });
+        return {
+          blob,
+          mediaUrl: URL.createObjectURL(blob),
+          mimeType: blob.type || 'video/mp4',
+          width,
+          height,
+          engineLabel: 'Rendered via LTX-Video GPU',
+        };
+      } catch {
+        // Try next HF GPU
+      }
+    }
+
+    // Attempt B: multimodalart/wan2-1-fast (/generate_video)
+    if (Date.now() <= routerDeadline) {
+      try {
+        const wanW = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
+        const wanH = aspectRatio === '9:16' ? 768 : 480;
+        const blob = await runBrowserGradioJob({
+          spaceId: 'multimodalart/wan2-1-fast',
+          label: 'Qwen Wan 2.1',
+          endpoint: '/generate_video',
+          initialMessage: 'Routing to Qwen Wan 2.1 AI GPU (16fps fast)...',
+          payload: {
+            input_image: handle_file(imageBlob),
+            prompt,
+            height: wanH,
+            width: wanW,
+            negative_prompt: 'blurry, static, jittery, distorted, watermark, text, low quality',
+            duration_seconds: 2,
+            guidance_scale: 1,
+            steps: 4,
+            seed: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+          },
+          hfToken: resolvedHf,
+          quickQueueTimeoutMs: 11000,
+          jobTimeoutMs: 22000,
+          onProgress,
+        });
+        return {
+          blob,
+          mediaUrl: URL.createObjectURL(blob),
+          mimeType: blob.type || 'video/mp4',
+          width: wanW,
+          height: wanH,
+          engineLabel: 'Rendered via Qwen Wan 2.1',
+        };
+      } catch {
+        // Try next HF GPU
+      }
+    }
+
+    // Attempt C: stabilityai/stable-video-diffusion (/video)
+    if (Date.now() <= routerDeadline) {
+      try {
+        const blob = await runBrowserGradioJob({
+          spaceId: 'stabilityai/stable-video-diffusion',
+          label: 'Stable Video Diffusion',
+          endpoint: '/video',
+          initialMessage: 'Routing to Stable Video Diffusion (16fps)...',
+          payload: {
+            image: handle_file(imageBlob),
+            seed: Math.floor(Math.random() * 1000000),
+            randomize_seed: true,
+            motion_bucket_id: 127,
+            fps_id: 16,
+          },
+          hfToken: resolvedHf,
+          quickQueueTimeoutMs: 10000,
+          jobTimeoutMs: 22000,
+          onProgress,
+        });
+        return {
+          blob,
+          mediaUrl: URL.createObjectURL(blob),
+          mimeType: blob.type || 'video/mp4',
+          width: 1024,
+          height: 576,
+          engineLabel: 'Rendered via Stable Video Diffusion GPU',
+        };
+      } catch {
+        // Fall through cleanly
+      }
+    }
+
+    return null;
+  }
+
+  // Text-to-Video direct browser HF spaces (LTX-Video -> CogVideoX-2B)
+  if (Date.now() <= routerDeadline) {
     try {
       const blob = await runBrowserGradioJob({
         spaceId: 'Lightricks/ltx-video-distilled',
         label: 'LTX-Video Distilled',
-        endpoint: '/image_to_video',
-        initialMessage: 'Sending photo to AI GPU for real motion...',
+        endpoint: '/text_to_video',
+        initialMessage: 'Connecting to LTX-Video AI GPU (16fps fast)...',
         payload: {
           prompt,
           negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
-          input_image_filepath: handle_file(imageBlob),
+          input_image_filepath: null,
           input_video_filepath: null,
           height_ui: height,
           width_ui: width,
-          mode: 'image-to-video',
+          mode: 'text-to-video',
           duration_ui: 2,
           ui_frames_to_use: 9,
           seed_ui: Math.floor(Math.random() * 1000000),
           randomize_seed: true,
           ui_guidance_scale: 1,
-          improve_texture_flag: true,
+          improve_texture_flag: false,
         },
         hfToken: resolvedHf,
+        quickQueueTimeoutMs: 11000,
+        jobTimeoutMs: 22000,
         onProgress,
       });
       return {
@@ -355,113 +526,41 @@ export async function runDirectBrowserAiVideo(params: {
         engineLabel: 'Rendered via LTX-Video GPU',
       };
     } catch {
-      // Try next HF GPU
+      // Try CogVideoX next
     }
+  }
 
-    // Attempt B: multimodalart/wan2-1-fast (/generate_video)
+  if (Date.now() <= routerDeadline) {
     try {
-      const wanW = aspectRatio === '9:16' ? 512 : aspectRatio === '1:1' ? 512 : 896;
-      const wanH = aspectRatio === '9:16' ? 896 : 512;
       const blob = await runBrowserGradioJob({
-        spaceId: 'multimodalart/wan2-1-fast',
-        label: 'Qwen Wan 2.1',
-        endpoint: '/generate_video',
-        initialMessage: 'Sending photo to Qwen Wan 2.1 AI GPU for real motion...',
+        spaceId: 'zai-org/CogVideoX-2b-space',
+        label: 'CogVideoX-2B',
+        endpoint: '/generate',
+        initialMessage: 'Connecting to CogVideoX-2B AI GPU (fast steps)...',
         payload: {
-          input_image: handle_file(imageBlob),
           prompt,
-          height: wanH,
-          width: wanW,
-          negative_prompt: 'blurry, static, jittery, distorted, watermark, text, low quality',
-          duration_seconds: 2,
-          guidance_scale: 1,
-          steps: 4,
-          seed: Math.floor(Math.random() * 1000000),
-          randomize_seed: true,
+          num_inference_steps: 16,
+          guidance_scale: 6,
         },
         hfToken: resolvedHf,
+        quickQueueTimeoutMs: 10000,
+        jobTimeoutMs: 22000,
         onProgress,
       });
       return {
         blob,
         mediaUrl: URL.createObjectURL(blob),
         mimeType: blob.type || 'video/mp4',
-        width: wanW,
-        height: wanH,
-        engineLabel: 'Rendered via Qwen Wan 2.1',
+        width: 720,
+        height: 480,
+        engineLabel: 'Rendered via CogVideoX GPU',
       };
     } catch {
-      // Try next HF GPU
+      return null;
     }
-
-    // Attempt C: stabilityai/stable-video-diffusion (/video)
-    try {
-      const blob = await runBrowserGradioJob({
-        spaceId: 'stabilityai/stable-video-diffusion',
-        label: 'Stable Video Diffusion',
-        endpoint: '/video',
-        initialMessage: 'Sending photo to Stable Video Diffusion GPU for real motion...',
-        payload: {
-          image: handle_file(imageBlob),
-          seed: Math.floor(Math.random() * 1000000),
-          randomize_seed: true,
-          motion_bucket_id: 127,
-          fps_id: 6,
-        },
-        hfToken: resolvedHf,
-        onProgress,
-      });
-      return {
-        blob,
-        mediaUrl: URL.createObjectURL(blob),
-        mimeType: blob.type || 'video/mp4',
-        width: 1024,
-        height: 576,
-        engineLabel: 'Rendered via Stable Video Diffusion GPU',
-      };
-    } catch {
-      // Fall through to 3D Parallax Motion fallback cleanly
-    }
-
-    return null;
   }
 
-  // Text-to-Video direct browser HF spaces
-  try {
-    const blob = await runBrowserGradioJob({
-      spaceId: 'Lightricks/ltx-video-distilled',
-      label: 'LTX-Video Distilled',
-      endpoint: '/text_to_video',
-      initialMessage: 'Connecting to LTX-Video AI GPU...',
-      payload: {
-        prompt,
-        negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
-        input_image_filepath: null,
-        input_video_filepath: null,
-        height_ui: height,
-        width_ui: width,
-        mode: 'text-to-video',
-        duration_ui: 2,
-        ui_frames_to_use: 9,
-        seed_ui: Math.floor(Math.random() * 1000000),
-        randomize_seed: true,
-        ui_guidance_scale: 1,
-        improve_texture_flag: true,
-      },
-      hfToken: resolvedHf,
-      onProgress,
-    });
-    return {
-      blob,
-      mediaUrl: URL.createObjectURL(blob),
-      mimeType: blob.type || 'video/mp4',
-      width,
-      height,
-      engineLabel: 'Rendered via LTX-Video GPU',
-    };
-  } catch {
-    return null;
-  }
+  return null;
 }
 
 interface GradioParamMeta {
@@ -487,16 +586,19 @@ export async function runDirectBrowserLipSync(params: {
     { spaceId: 'vinthony/SadTalker', label: 'SadTalker v2 GPU' },
   ];
 
+  const lipSyncDeadline = Date.now() + 26000;
+
   for (let i = 0; i < spaces.length; i += 1) {
+    if (Date.now() > lipSyncDeadline) break;
     const target = spaces[i];
     try {
       onProgress(20 + i * 8, `Sending portrait & audio to ${target.label}...`);
       const client = await withTimeout(
         opts ? Client.connect(target.spaceId, opts) : Client.connect(target.spaceId),
-        12000,
+        7000,
         `Connect ${target.label}`
       );
-      const apiInfo = (await withTimeout(client.view_api(), 6000, `Inspect ${target.spaceId}`)) as {
+      const apiInfo = (await withTimeout(client.view_api(), 4500, `Inspect ${target.spaceId}`)) as {
         named_endpoints?: Record<string, { parameters?: GradioParamMeta[] }>;
       };
 
@@ -550,6 +652,8 @@ export async function runDirectBrowserLipSync(params: {
         hfToken: resolvedHf,
         existingClient: client,
         initialMessage: `Animating talking/singing face via ${target.label}...`,
+        quickQueueTimeoutMs: resolvedHf ? 13000 : 8000,
+        jobTimeoutMs: 22000,
         onProgress,
       });
 

@@ -454,10 +454,13 @@ export default function App() {
       let shouldTryDirectBrowser = false;
 
       if (audioDataUrl && imagePayload) {
+        const lipSyncAbort = new AbortController();
+        const lipSyncTimer = window.setTimeout(() => lipSyncAbort.abort(), 29000);
         try {
           const response = await fetch('/api/generate/lip-sync', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            signal: lipSyncAbort.signal,
             body: JSON.stringify({
               imageDataUrl: imagePayload,
               audioDataUrl,
@@ -508,6 +511,7 @@ export default function App() {
                   cloudBusy = true;
                   break;
                 } else if (evt.type === 'done' && evt.videoApiPath) {
+                  window.clearTimeout(lipSyncTimer);
                   setProgress((p) =>
                     p.active ? { ...p, percent: 95, statusMessage: 'Preparing MP4 playback...' } : p
                   );
@@ -546,7 +550,10 @@ export default function App() {
             }
           }
         } catch {
-          shouldTryDirectBrowser = true;
+          // Only fall back to direct browser HF calls when backend route is unreachable, not after a 29s GPU timeout
+          shouldTryDirectBrowser = !lipSyncAbort.signal.aborted;
+        } finally {
+          window.clearTimeout(lipSyncTimer);
         }
       }
 
@@ -701,15 +708,19 @@ export default function App() {
         imagePayload = await blobToDataUrl(await fetched.blob());
       }
 
+      const hfStreamAbort = new AbortController();
+      const hfStreamTimer = window.setTimeout(() => hfStreamAbort.abort(), 46000);
       try {
         const response = await fetch('/api/generate/hf-video', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
+          signal: hfStreamAbort.signal,
           body: JSON.stringify({
             prompt: effectivePrompt,
             mode: targetMode,
             aspectRatio,
             style: stylePreset,
+            duration,
             imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
             geminiKey: activeGeminiKey || undefined,
             hfToken: activeHfToken || undefined,
@@ -763,6 +774,7 @@ export default function App() {
                 needsCinemaFallback = true;
                 break;
               } else if (evt.type === 'done' && evt.videoApiPath) {
+                window.clearTimeout(hfStreamTimer);
                 setProgress((prev) =>
                   prev.active
                     ? {
@@ -809,7 +821,14 @@ export default function App() {
           }
         }
       } catch {
-        shouldTryDirectBrowser = true;
+        // If backend SSE timed out at 29s, go straight to fast 16fps fallback instead of repeating HF queues
+        if (hfStreamAbort.signal.aborted) {
+          needsCinemaFallback = true;
+        } else {
+          shouldTryDirectBrowser = true;
+        }
+      } finally {
+        window.clearTimeout(hfStreamTimer);
       }
 
       // Direct Browser @gradio/client + Google Veo REST fallback (handles Vercel static deployments where /api/* returns 404)

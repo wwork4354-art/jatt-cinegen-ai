@@ -237,19 +237,31 @@ async function startServer() {
     }
   });
 
-  // 2. Smart Multi-Engine Video Router (Veo -> SiliconFlow Wan 2.1 -> HF GPUs -> Keyless 3-Scene Backup)
+  // 2. Smart Multi-Engine Video Router (Veo -> Pollinations Video -> HF Inference API -> SiliconFlow -> Live HF Spaces -> Stitched 16fps Fallback)
   app.post('/api/generate/hf-video', async (req, res) => {
-    const { prompt, mode, aspectRatio, style, imageDataUrl, geminiKey, hfToken, siliconFlowKey } =
-      req.body as {
-        prompt?: string;
-        mode?: HfVideoMode;
-        aspectRatio?: HfAspectRatio;
-        style?: StylePreset;
-        imageDataUrl?: string;
-        geminiKey?: string;
-        hfToken?: string;
-        siliconFlowKey?: string;
-      };
+    const {
+      prompt,
+      mode,
+      aspectRatio,
+      style,
+      duration,
+      imageDataUrl,
+      geminiKey,
+      hfToken,
+      siliconFlowKey,
+      pollinationsKey,
+    } = req.body as {
+      prompt?: string;
+      mode?: HfVideoMode;
+      aspectRatio?: HfAspectRatio;
+      style?: StylePreset;
+      duration?: '5s' | '10s' | '15s';
+      imageDataUrl?: string;
+      geminiKey?: string;
+      hfToken?: string;
+      siliconFlowKey?: string;
+      pollinationsKey?: string;
+    };
 
     const cleanPrompt = (prompt || '').trim();
     if (!cleanPrompt) {
@@ -260,6 +272,7 @@ async function startServer() {
     const safeMode: HfVideoMode = mode === 'image-to-video' ? 'image-to-video' : 'text-to-video';
     const safeRatio: HfAspectRatio =
       aspectRatio === '9:16' || aspectRatio === '1:1' ? aspectRatio : '16:9';
+    const safeDuration = duration === '10s' || duration === '15s' ? duration : '5s';
 
     const styleSuffix =
       style === 'cinematic'
@@ -280,8 +293,10 @@ async function startServer() {
     res.flushHeaders?.();
 
     let aborted = false;
-    req.on('close', () => {
-      aborted = true;
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        aborted = true;
+      }
     });
 
     const sendEvent = (payload: unknown) => {
@@ -292,33 +307,48 @@ async function startServer() {
     sendEvent({
       type: 'progress',
       percent: 10,
-      message: 'Initializing Smart Multi-Engine Video Router...',
+      message: 'Routing to active AI Video Inference Endpoints (45s limit)...',
     });
 
+    let routeTimer: NodeJS.Timeout | undefined;
     try {
-      await generateSmartMultiEngineVideo({
-        prompt: fullPrompt,
-        mode: safeMode,
-        aspectRatio: safeRatio,
-        imageDataUrl,
-        geminiKey,
-        hfToken,
-        siliconFlowKey,
-        isAborted: () => aborted,
-        onEvent: (event) => {
-          sendEvent(event);
-        },
+      const routeTimeout = new Promise<never>((_, reject) => {
+        routeTimer = setTimeout(() => {
+          aborted = true;
+          reject(new Error('45-second inference timeout reached'));
+        }, 45000);
       });
+
+      await Promise.race([
+        generateSmartMultiEngineVideo({
+          prompt: fullPrompt,
+          mode: safeMode,
+          aspectRatio: safeRatio,
+          duration: safeDuration,
+          imageDataUrl,
+          geminiKey,
+          hfToken,
+          siliconFlowKey,
+          pollinationsKey,
+          isAborted: () => aborted,
+          onEvent: (event) => {
+            sendEvent(event);
+          },
+        }),
+        routeTimeout,
+      ]);
     } catch (err) {
-      if (!aborted) {
+      if (!res.writableEnded) {
+        aborted = false;
         sendEvent({
           type: 'busy',
-          message: `Free GPU busy — retrying or switch to Fast 3-Scene Reel (${
-            err instanceof Error ? err.message : 'Queue unavailable'
-          })`,
+          message: `Free inference busy (${
+            err instanceof Error ? err.message : '45s timeout'
+          }) — switching to fast stitched 16fps fallback...`,
         });
       }
     } finally {
+      if (routeTimer) clearTimeout(routeTimer);
       if (!res.writableEnded) {
         res.end();
       }
@@ -469,8 +499,10 @@ async function startServer() {
     res.flushHeaders?.();
 
     let aborted = false;
-    req.on('close', () => {
-      aborted = true;
+    res.on('close', () => {
+      if (!res.writableEnded) {
+        aborted = true;
+      }
     });
 
     const sendEvent = (payload: unknown) => {

@@ -357,80 +357,258 @@ async function runGradioJob(params: {
     hfToken,
     onProgress,
     existingClient,
-    connectTimeoutMs = 12000,
-    quickQueueTimeoutMs = hfToken?.trim() ? 25000 : 12000,
-    jobTimeoutMs = 95000,
+    connectTimeoutMs = 7000,
+    quickQueueTimeoutMs = hfToken?.trim() ? 14000 : 8000,
+    jobTimeoutMs = 28000,
   } = params;
 
-  onProgress(22, `Sending request to ${label} GPU...`);
+  onProgress(22, `Connecting to ${label} (16fps fast GPU)...`);
   const client = existingClient ?? (await connectSpaceFast(spaceId, hfToken, connectTimeoutMs));
 
-  onProgress(28, `Checking queue availability on ${label}...`);
-  const submission = client.submit(endpoint, payload);
+  onProgress(28, `Submitting fast clip to ${label} GPU...`);
+  const submission = client.submit(endpoint, payload) as AsyncIterable<Record<string, unknown>> & {
+    cancel?: () => Promise<void> | void;
+  };
 
   const startedAt = Date.now();
   let hasStartedGenerating = false;
   let resultData: unknown = null;
+  let lastPercent = 30;
+  let settled = false;
 
-  for await (const rawMsg of submission as AsyncIterable<Record<string, unknown>>) {
-    const elapsed = Date.now() - startedAt;
+  const consumePromise = new Promise<unknown>((resolve, reject) => {
+    let watchdogTimer: NodeJS.Timeout | undefined;
 
-    if (!hasStartedGenerating && elapsed > quickQueueTimeoutMs) {
-      throw new Error(`${label} queue busy (8s quick-check limit)`);
-    }
-    if (elapsed > jobTimeoutMs) {
-      throw new Error(`${label} GPU execution timed out`);
-    }
+    const cleanup = () => {
+      settled = true;
+      if (watchdogTimer) clearInterval(watchdogTimer);
+    };
 
-    if (rawMsg.type === 'status') {
-      const stage = String(rawMsg.stage || '');
-      const msgText = typeof rawMsg.message === 'string' ? rawMsg.message : '';
-      if (stage === 'error') {
-        throw new Error(msgText || `${label} GPU returned an error`);
+    const abortJob = (reason: string) => {
+      if (settled) return;
+      cleanup();
+      try {
+        void Promise.resolve(submission.cancel?.()).catch(() => {});
+      } catch {
+        // Ignore cancel errors
       }
-      if (typeof rawMsg.eta === 'number' && rawMsg.eta > (hfToken?.trim() ? 90 : 45)) {
-        throw new Error(`${label} GPU queue wait too long (~${Math.round(rawMsg.eta)}s)`);
+      reject(new Error(reason));
+    };
+
+    // Active wall-clock watchdog so silent Gradio SSE queues NEVER freeze at 35%
+    watchdogTimer = setInterval(() => {
+      const elapsed = Date.now() - startedAt;
+      if (!hasStartedGenerating && elapsed > quickQueueTimeoutMs) {
+        abortJob(`${label} queue busy (${Math.round(quickQueueTimeoutMs / 1000)}s limit)`);
+        return;
       }
-      if (stage === 'generating') {
-        hasStartedGenerating = true;
-        onProgress(58, `Generating Real Motion Frames via ${label}...`);
-      } else if (typeof rawMsg.position === 'number' && rawMsg.position > 0) {
-        if (rawMsg.position > 8 && !hfToken?.trim()) {
-          throw new Error(`${label} queue full (#${rawMsg.position})`);
+      if (elapsed > jobTimeoutMs) {
+        abortJob(`${label} exceeded fast ${Math.round(jobTimeoutMs / 1000)}s GPU budget`);
+        return;
+      }
+      // Smoothly advance indicator while waiting so UI never appears stuck
+      lastPercent = Math.min(hasStartedGenerating ? 82 : 44, lastPercent + 2);
+      onProgress(
+        lastPercent,
+        hasStartedGenerating
+          ? `Generating fast 16fps frames via ${label}...`
+          : `Waiting for ${label} GPU slot (${Math.round(elapsed / 1000)}s)...`
+      );
+    }, 1500);
+
+    (async () => {
+      try {
+        for await (const rawMsg of submission) {
+          if (settled) break;
+          if (rawMsg.type === 'status') {
+            const stage = String(rawMsg.stage || '');
+            const msgText = typeof rawMsg.message === 'string' ? rawMsg.message : '';
+            if (stage === 'error') {
+              abortJob(msgText || `${label} GPU returned an error`);
+              return;
+            }
+            if (typeof rawMsg.eta === 'number' && rawMsg.eta > 35) {
+              abortJob(`${label} queue wait too long (~${Math.round(rawMsg.eta)}s)`);
+              return;
+            }
+            if (stage === 'generating') {
+              hasStartedGenerating = true;
+              lastPercent = Math.max(lastPercent, 58);
+              onProgress(lastPercent, `Generating fast 16fps AI clip via ${label}...`);
+            } else if (typeof rawMsg.position === 'number' && rawMsg.position > 0) {
+              if (rawMsg.position > 6 && !hfToken?.trim()) {
+                abortJob(`${label} queue busy (#${rawMsg.position})`);
+                return;
+              }
+              lastPercent = Math.max(lastPercent, 36);
+              onProgress(lastPercent, `GPU Queue (#${rawMsg.position}) on ${label}...`);
+            } else {
+              lastPercent = Math.max(lastPercent, 38);
+              onProgress(lastPercent, `Processing on ${label} GPU...`);
+            }
+          } else if (rawMsg.type === 'data') {
+            cleanup();
+            resolve(rawMsg.data);
+            return;
+          }
         }
-        onProgress(34, `Free GPU Queue (#${rawMsg.position}) on ${label}...`);
-      } else {
-        onProgress(38, `Sending photo to AI GPU for real motion (${label})...`);
+        if (!settled) {
+          abortJob(`${label} closed without returning video`);
+        }
+      } catch (err) {
+        abortJob(err instanceof Error ? err.message : `${label} stream failed`);
       }
-    } else if (rawMsg.type === 'data') {
-      resultData = rawMsg.data;
-      break;
-    }
-  }
+    })();
+  });
+
+  resultData = await consumePromise;
 
   const videoUrl = extractGradioVideoUrl(resultData);
   if (!videoUrl) {
     throw new Error(`${label} did not return a valid MP4 video stream`);
   }
 
-  onProgress(86, `Downloading generated MP4 from ${label}...`);
+  onProgress(88, `Downloading fast MP4 clip from ${label}...`);
   return downloadVideoBuffer(videoUrl, undefined, label);
 }
 
+// Engine 1B: Pollinations.ai Video API (gen.pollinations.ai/video)
+async function tryPollinationsVideo(params: {
+  prompt: string;
+  aspectRatio: HfAspectRatio;
+  pollinationsKey?: string;
+  timeoutMs: number;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number }> {
+  const { prompt, aspectRatio, pollinationsKey, timeoutMs, onProgress, isAborted } = params;
+  onProgress(16, 'Generating crisp 5s MP4 via Pollinations.ai Video...');
+
+  const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 832;
+  const height = aspectRatio === '9:16' ? 832 : aspectRatio === '1:1' ? 512 : 480;
+  const keyParam = pollinationsKey ? `&key=${encodeURIComponent(pollinationsKey)}` : '';
+  const url = `https://gen.pollinations.ai/video/${encodeURIComponent(
+    prompt
+  )}?model=wan-fast&duration=5&aspectRatio=${encodeURIComponent(aspectRatio)}${keyParam}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(22000, timeoutMs));
+  try {
+    if (isAborted?.()) throw new Error('Aborted');
+    const headers: Record<string, string> = {};
+    if (pollinationsKey) {
+      headers.Authorization = `Bearer ${pollinationsKey}`;
+    }
+    const res = await fetch(url, { headers, signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`Pollinations Video HTTP ${res.status}`);
+    }
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.startsWith('video/') && !contentType.includes('octet-stream')) {
+      throw new Error('Pollinations Video returned non-video response');
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.byteLength < 8000) {
+      throw new Error('Pollinations Video returned empty clip');
+    }
+    return {
+      buffer,
+      mimeType: contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4',
+      width,
+      height,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Engine 1C: Active Hugging Face Inference API (router.huggingface.co) - Lightricks/LTX-Video & Wan-AI/Wan2.1-T2V-1.3B
+async function tryHuggingFaceInferenceVideo(params: {
+  hfToken: string;
+  modelId: string;
+  label: string;
+  prompt: string;
+  aspectRatio: HfAspectRatio;
+  timeoutMs: number;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number }> {
+  const { hfToken, modelId, label, prompt, aspectRatio, timeoutMs, onProgress, isAborted } = params;
+  onProgress(22, `Generating 5s MP4 via HF Inference API (${label})...`);
+
+  const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
+  const height = aspectRatio === '9:16' ? 768 : aspectRatio === '1:1' ? 512 : 448;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), Math.min(25000, timeoutMs));
+  try {
+    if (isAborted?.()) throw new Error('Aborted');
+    const res = await fetch(`https://router.huggingface.co/hf-inference/models/${modelId}`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${hfToken}`,
+        'Content-Type': 'application/json',
+        Accept: 'video/mp4, application/octet-stream, application/json',
+      },
+      body: JSON.stringify({
+        inputs: prompt,
+        parameters: {
+          num_frames: 41,
+          num_inference_steps: 20,
+          guidance_scale: modelId.includes('LTX') ? 3.0 : 5.0,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      throw new Error(`${label} HTTP ${res.status}`);
+    }
+
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (contentType.includes('application/json')) {
+      const json = (await res.json()) as { video?: string; url?: string; error?: string };
+      const remoteUrl = json.video || json.url;
+      if (remoteUrl && remoteUrl.startsWith('http')) {
+        const downloaded = await downloadVideoBuffer(remoteUrl, undefined, label);
+        return { ...downloaded, width, height };
+      }
+      throw new Error(json.error || `${label} returned JSON without video`);
+    }
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (buffer.byteLength < 8000) {
+      throw new Error(`${label} returned an empty video payload`);
+    }
+
+    return {
+      buffer,
+      mimeType: contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4',
+      width,
+      height,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function getSpaceDims(aspectRatio: HfAspectRatio): { width: number; height: number } {
-  if (aspectRatio === '9:16') return { width: 512, height: 704 };
+  // Fast compact dimensions (multiples of 32) for crisp 5s clips within 45s budget
+  if (aspectRatio === '9:16') return { width: 384, height: 640 };
   if (aspectRatio === '1:1') return { width: 512, height: 512 };
-  return { width: 704, height: 512 };
+  return { width: 640, height: 384 };
 }
 
 export async function generateSmartMultiEngineVideo(params: {
   prompt: string;
   mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
+  duration?: '5s' | '10s' | '15s';
   imageDataUrl?: string;
   geminiKey?: string;
   hfToken?: string;
   siliconFlowKey?: string;
+  pollinationsKey?: string;
   onEvent: (event: HfProgressEvent) => void;
   isAborted?: () => boolean;
 }): Promise<void> {
@@ -442,6 +620,7 @@ export async function generateSmartMultiEngineVideo(params: {
     geminiKey,
     hfToken,
     siliconFlowKey,
+    pollinationsKey,
     onEvent,
     isAborted,
   } = params;
@@ -450,12 +629,21 @@ export async function generateSmartMultiEngineVideo(params: {
   const imageBlob = mode === 'image-to-video' && imageDataUrl ? dataUrlToBlob(imageDataUrl) : null;
 
   const resolvedGeminiKey = (geminiKey?.trim() || process.env.VITE_GEMINI_API_KEY || '').trim();
-  const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || '').trim();
+  const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || process.env.HF_TOKEN || '').trim();
   const resolvedSiliconFlowKey = (
     siliconFlowKey?.trim() ||
     process.env.VITE_SILICONFLOW_KEY ||
     ''
   ).trim();
+  const resolvedPollinationsKey = (
+    pollinationsKey?.trim() ||
+    process.env.VITE_POLLINATIONS_API_KEY ||
+    process.env.POLLINATIONS_API_KEY ||
+    ''
+  ).trim();
+
+  const cloudRouterDeadline = Date.now() + 45000;
+  const remainingBudget = () => Math.max(4000, cloudRouterDeadline - Date.now());
 
   const progressCb = (percent: number, message: string) => {
     if (!isAborted?.()) {
@@ -485,7 +673,56 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 2A: SiliconFlow Free Credit API (Qwen Wan-AI/Wan2.1-T2V-14B / I2V)
+  // PRIORITY 2A: Pollinations.ai Video API (when configured or available)
+  if (resolvedPollinationsKey && mode === 'text-to-video') {
+    attempts.push({
+      badge: 'Rendered via Pollinations.ai Video',
+      run: () =>
+        tryPollinationsVideo({
+          prompt,
+          aspectRatio,
+          pollinationsKey: resolvedPollinationsKey,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+  }
+
+  // PRIORITY 2B: Active Hugging Face Inference API (Lightricks/LTX-Video & Wan-AI/Wan2.1-T2V-1.3B)
+  if (resolvedHfToken && mode === 'text-to-video') {
+    attempts.push({
+      badge: 'Rendered via HF Inference (LTX-Video)',
+      run: () =>
+        tryHuggingFaceInferenceVideo({
+          hfToken: resolvedHfToken,
+          modelId: 'Lightricks/LTX-Video',
+          label: 'Lightricks/LTX-Video',
+          prompt,
+          aspectRatio,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+
+    attempts.push({
+      badge: 'Rendered via HF Inference (Wan2.1-1.3B)',
+      run: () =>
+        tryHuggingFaceInferenceVideo({
+          hfToken: resolvedHfToken,
+          modelId: 'Wan-AI/Wan2.1-T2V-1.3B',
+          label: 'Wan-AI/Wan2.1-T2V-1.3B',
+          prompt,
+          aspectRatio,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+  }
+
+  // PRIORITY 2C: SiliconFlow Free Credit API (Qwen Wan-AI/Wan2.1-T2V-14B / I2V)
   if (resolvedSiliconFlowKey) {
     attempts.push({
       badge: 'Rendered via Qwen Wan 2.1',
@@ -502,7 +739,7 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 2B: Hugging Face Image-to-Video (LTX-Video -> Qwen Wan 2.1 Fast -> Stable Video Diffusion)
+  // PRIORITY 3: Verified Active Hugging Face Gradio GPUs (5s crisp clips within 45s budget)
   if (mode === 'image-to-video' && imageBlob) {
     attempts.push({
       badge: 'Rendered via LTX-Video GPU',
@@ -510,8 +747,9 @@ export async function generateSmartMultiEngineVideo(params: {
         onEvent({
           type: 'progress',
           percent: 20,
-          message: 'Sending photo to AI GPU for real motion...',
+          message: 'Generating crisp 5s clip via Lightricks/LTX-Video...',
         });
+        const budget = remainingBudget();
         const res = await runGradioJob({
           spaceId: 'Lightricks/ltx-video-distilled',
           label: 'LTX-Video Distilled',
@@ -524,14 +762,17 @@ export async function generateSmartMultiEngineVideo(params: {
             height_ui: height,
             width_ui: width,
             mode: 'image-to-video',
-            duration_ui: 2,
+            duration_ui: 5,
             ui_frames_to_use: 9,
             seed_ui: Math.floor(Math.random() * 1000000),
             randomize_seed: true,
             ui_guidance_scale: 1,
-            improve_texture_flag: true,
+            improve_texture_flag: false,
           },
           hfToken: resolvedHfToken,
+          connectTimeoutMs: 7000,
+          quickQueueTimeoutMs: Math.min(12000, budget),
+          jobTimeoutMs: Math.min(26000, budget),
           onProgress: progressCb,
         });
         return { ...res, width, height };
@@ -541,8 +782,9 @@ export async function generateSmartMultiEngineVideo(params: {
     attempts.push({
       badge: 'Rendered via Qwen Wan 2.1',
       run: async () => {
-        const wanW = aspectRatio === '9:16' ? 512 : aspectRatio === '1:1' ? 512 : 896;
-        const wanH = aspectRatio === '9:16' ? 896 : 512;
+        const wanW = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
+        const wanH = aspectRatio === '9:16' ? 768 : 480;
+        const budget = remainingBudget();
         const res = await runGradioJob({
           spaceId: 'multimodalart/wan2-1-fast',
           label: 'Qwen Wan 2.1',
@@ -553,13 +795,16 @@ export async function generateSmartMultiEngineVideo(params: {
             height: wanH,
             width: wanW,
             negative_prompt: 'blurry, static, jittery, distorted, watermark, text, low quality',
-            duration_seconds: 2,
+            duration_seconds: 5,
             guidance_scale: 1,
             steps: 4,
             seed: Math.floor(Math.random() * 1000000),
             randomize_seed: true,
           },
           hfToken: resolvedHfToken,
+          connectTimeoutMs: 7000,
+          quickQueueTimeoutMs: Math.min(11000, budget),
+          jobTimeoutMs: Math.min(24000, budget),
           onProgress: progressCb,
         });
         return { ...res, width: wanW, height: wanH };
@@ -569,6 +814,7 @@ export async function generateSmartMultiEngineVideo(params: {
     attempts.push({
       badge: 'Rendered via Stable Video Diffusion GPU',
       run: async () => {
+        const budget = remainingBudget();
         const res = await runGradioJob({
           spaceId: 'stabilityai/stable-video-diffusion',
           label: 'Stable Video Diffusion',
@@ -578,9 +824,12 @@ export async function generateSmartMultiEngineVideo(params: {
             seed: Math.floor(Math.random() * 1000000),
             randomize_seed: true,
             motion_bucket_id: 127,
-            fps_id: 6,
+            fps_id: 16,
           },
           hfToken: resolvedHfToken,
+          connectTimeoutMs: 7000,
+          quickQueueTimeoutMs: Math.min(10000, budget),
+          jobTimeoutMs: Math.min(22000, budget),
           onProgress: progressCb,
         });
         return { ...res, width: 1024, height: 576 };
@@ -590,6 +839,7 @@ export async function generateSmartMultiEngineVideo(params: {
     attempts.push({
       badge: 'Rendered via LTX-Video GPU',
       run: async () => {
+        const budget = remainingBudget();
         const res = await runGradioJob({
           spaceId: 'Lightricks/ltx-video-distilled',
           label: 'LTX-Video Distilled',
@@ -602,14 +852,17 @@ export async function generateSmartMultiEngineVideo(params: {
             height_ui: height,
             width_ui: width,
             mode: 'text-to-video',
-            duration_ui: 2,
+            duration_ui: 5,
             ui_frames_to_use: 9,
             seed_ui: Math.floor(Math.random() * 1000000),
             randomize_seed: true,
             ui_guidance_scale: 1,
-            improve_texture_flag: true,
+            improve_texture_flag: false,
           },
           hfToken: resolvedHfToken,
+          connectTimeoutMs: 7000,
+          quickQueueTimeoutMs: Math.min(12000, budget),
+          jobTimeoutMs: Math.min(26000, budget),
           onProgress: progressCb,
         });
         return { ...res, width, height };
@@ -617,45 +870,22 @@ export async function generateSmartMultiEngineVideo(params: {
     });
 
     attempts.push({
-      badge: 'Rendered via Qwen Wan 2.1',
-      run: async () => {
-        const client = await connectSpaceFast('Wan-AI/Wan2.1', resolvedHfToken, 10000);
-        const apiInfo = (await withTimeout(client.view_api(), 5000, 'Inspect Wan2.1 API')) as {
-          named_endpoints?: Record<string, unknown>;
-        };
-        const endpoints = Object.keys(apiInfo.named_endpoints ?? {});
-        const preferred =
-          endpoints.find((e) => e.includes('t2v') || e.includes('predict') || e.includes('generate')) ||
-          endpoints[0];
-        if (!preferred) {
-          throw new Error('Wan-AI/Wan2.1 endpoint unavailable');
-        }
-        const res = await runGradioJob({
-          spaceId: 'Wan-AI/Wan2.1',
-          label: 'Qwen Wan 2.1',
-          endpoint: preferred,
-          payload: { prompt },
-          hfToken: resolvedHfToken,
-          existingClient: client,
-          onProgress: progressCb,
-        });
-        return { ...res, width: 832, height: 480 };
-      },
-    });
-
-    attempts.push({
       badge: 'Rendered via CogVideoX GPU',
       run: async () => {
+        const budget = remainingBudget();
         const res = await runGradioJob({
           spaceId: 'zai-org/CogVideoX-2b-space',
           label: 'CogVideoX-2B',
           endpoint: '/generate',
           payload: {
             prompt,
-            num_inference_steps: 25,
+            num_inference_steps: 18,
             guidance_scale: 6,
           },
           hfToken: resolvedHfToken,
+          connectTimeoutMs: 7000,
+          quickQueueTimeoutMs: Math.min(11000, budget),
+          jobTimeoutMs: Math.min(24000, budget),
           onProgress: progressCb,
         });
         return { ...res, width: 720, height: 480 };
@@ -667,9 +897,13 @@ export async function generateSmartMultiEngineVideo(params: {
 
   for (let i = 0; i < attempts.length; i += 1) {
     if (isAborted?.()) return;
+    if (Date.now() > cloudRouterDeadline - 2000) {
+      lastReason = '45s cloud inference timeout reached';
+      break;
+    }
     const attempt = attempts[i];
     try {
-      const result = await attempt.run();
+      const result = await withTimeout(attempt.run(), remainingBudget(), attempt.badge);
       if (isAborted?.()) return;
       const fileId = storeCachedHfVideo(result.buffer, result.mimeType);
       onEvent({
@@ -685,21 +919,21 @@ export async function generateSmartMultiEngineVideo(params: {
       return;
     } catch (err) {
       lastReason = err instanceof Error ? err.message : 'Engine unavailable';
-      if (i + 1 < attempts.length && !isAborted?.()) {
+      if (i + 1 < attempts.length && Date.now() <= cloudRouterDeadline - 3000 && !isAborted?.()) {
         onEvent({
           type: 'progress',
-          percent: Math.min(35, 16 + i * 4),
-          message: `Routing to next available AI engine...`,
+          percent: Math.min(34, 16 + i * 5),
+          message: `Switching to next active video endpoint...`,
         });
       }
     }
   }
 
-  // PRIORITY 3 handoff to client CineGen Unlimited 3-Scene AI Reel
+  // Automatic seamless fallback to fast 16fps stitched reel so generation never hangs
   if (!isAborted?.()) {
     onEvent({
       type: 'busy',
-      message: `Cloud GPUs busy (${lastReason}) — switching to CineGen Unlimited Engine...`,
+      message: `Cloud endpoints busy (${lastReason}) — switching to fast stitched 16fps fallback...`,
     });
   }
 }
@@ -806,16 +1040,21 @@ export async function generateLipSyncVideo(params: {
   ];
 
   let lastReason = 'Lip-Sync cloud queues busy';
+  const lipSyncDeadline = Date.now() + 26000;
 
   for (let i = 0; i < spaces.length; i += 1) {
     if (isAborted?.()) return;
+    if (Date.now() > lipSyncDeadline) {
+      lastReason = 'Fast 26s cloud window reached';
+      break;
+    }
     const target = spaces[i];
     try {
       progressCb(18 + i * 5, `Connecting to ${target.label}...`);
-      const client = await connectSpaceFast(target.spaceId, resolvedHfToken, 8000);
+      const client = await connectSpaceFast(target.spaceId, resolvedHfToken, 7000);
       const apiInfo = (await withTimeout(
         client.view_api(),
-        5000,
+        4500,
         `Inspect ${target.spaceId} API`
       )) as {
         named_endpoints?: Record<string, { parameters?: GradioParamInfo[] }>;
@@ -844,9 +1083,9 @@ export async function generateLipSyncVideo(params: {
         payload,
         hfToken: resolvedHfToken,
         existingClient: client,
-        connectTimeoutMs: 12000,
-        quickQueueTimeoutMs: resolvedHfToken ? 25000 : 12000,
-        jobTimeoutMs: 95000,
+        connectTimeoutMs: 7000,
+        quickQueueTimeoutMs: resolvedHfToken ? 13000 : 8000,
+        jobTimeoutMs: 22000,
         onProgress: progressCb,
       });
 

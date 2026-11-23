@@ -167,7 +167,8 @@ export async function renderCanvasLipSyncVideo({
   let timeData: Uint8Array<ArrayBuffer> | null = null;
   const combinedTracks: MediaStreamTrack[] = [];
 
-  const fps = 30;
+  const fps = 16;
+  const frameIntervalMs = Math.round(1000 / fps);
   const videoStream = canvas.captureStream(fps);
   combinedTracks.push(...videoStream.getVideoTracks());
 
@@ -230,10 +231,15 @@ export async function renderCanvasLipSyncVideo({
   const mimeType = chooseSupportedMimeType(hasAudio);
   const bitrate = quality === '4k' ? 12_000_000 : quality === '1080p' ? 5_800_000 : 3_000_000;
 
-  const recorder = new MediaRecorder(finalStream, {
-    mimeType,
-    videoBitsPerSecond: bitrate,
-  });
+  let recorder: MediaRecorder;
+  try {
+    recorder = new MediaRecorder(finalStream, {
+      mimeType,
+      videoBitsPerSecond: bitrate,
+    });
+  } catch {
+    recorder = new MediaRecorder(finalStream);
+  }
 
   const chunks: BlobPart[] = [];
   recorder.ondataavailable = (event) => {
@@ -242,36 +248,53 @@ export async function renderCanvasLipSyncVideo({
     }
   };
 
+  let settledStop = false;
   const recordingFinished = new Promise<Blob>((resolve, reject) => {
     recorder.onstop = () => {
+      if (settledStop) return;
+      settledStop = true;
       const cleanMime = mimeType.split(';')[0];
       resolve(new Blob(chunks, { type: cleanMime }));
     };
-    recorder.onerror = () => reject(new Error('Lip-Sync video recording failed.'));
+    recorder.onerror = () => {
+      if (settledStop) return;
+      settledStop = true;
+      reject(new Error('Lip-Sync video recording failed.'));
+    };
   });
 
-  onProgress(35, `Animating lip-sync frames (${Math.round(totalSeconds)}s)...`, Math.ceil(totalSeconds));
+  onProgress(35, `Animating 16fps lip-sync clip (${Math.round(totalSeconds)}s)...`, Math.ceil(totalSeconds));
   recorder.start(400);
 
   const startTime = performance.now();
   const totalMs = totalSeconds * 1000;
-  const frameIntervalMs = 1000 / fps;
-  let lastFrameAt = 0;
   let lastProgressAt = 0;
   let smoothedEnergy = 0;
 
   try {
-    await new Promise<void>((resolve) => {
-      const tick = (now: number) => {
-        const elapsed = now - startTime;
-        if (elapsed < totalMs && now - lastFrameAt < frameIntervalMs - 2) {
-          requestAnimationFrame(tick);
-          return;
-        }
-        lastFrameAt = now;
+    await new Promise<void>((resolve, reject) => {
+      let loopDone = false;
+      const finishLoop = () => {
+        if (loopDone) return;
+        loopDone = true;
+        window.clearTimeout(loopSafetyTimer);
+        resolve();
+      };
+      const failLoop = (err: unknown) => {
+        if (loopDone) return;
+        loopDone = true;
+        window.clearTimeout(loopSafetyTimer);
+        reject(err instanceof Error ? err : new Error('Lip-Sync rendering failed.'));
+      };
+      const loopSafetyTimer = window.setTimeout(finishLoop, totalMs + 6000);
 
-        const t = Math.min(1, elapsed / totalMs);
-        const elapsedSec = elapsed / 1000;
+      const tick = () => {
+        if (loopDone) return;
+        try {
+          const now = performance.now();
+          const elapsed = now - startTime;
+          const t = Math.min(1, elapsed / totalMs);
+          const elapsedSec = elapsed / 1000;
 
         // Compute live vocal/music energy (0..1)
         let rawEnergy = 0;
@@ -363,7 +386,6 @@ export async function renderCanvasLipSyncVideo({
         const maxBarH = Math.max(24, height * 0.055);
 
         ctx.save();
-        // Subtle frosted capsule behind equalizer
         ctx.fillStyle = 'rgba(7, 9, 14, 0.56)';
         ctx.fillRect(startX - 14, baseY - maxBarH - 8, eqWidth + 28, maxBarH + 18);
 
@@ -394,25 +416,28 @@ export async function renderCanvasLipSyncVideo({
           onFrameCanvas(canvas);
         }
 
-        if (now - lastProgressAt >= 250 || elapsed >= totalMs) {
+        if (now - lastProgressAt >= 200 || elapsed >= totalMs) {
           lastProgressAt = now;
           const remainingSec = Math.max(0, Math.ceil((totalMs - elapsed) / 1000));
           const percent = Math.min(97, Math.round(35 + t * 62));
           onProgress(
             percent,
-            `Rendering Talking / Singing Video · ${remainingSec}s remaining...`,
+            `Rendering 16fps Lip-Sync Video · ${remainingSec}s remaining...`,
             remainingSec
           );
         }
 
-        if (elapsed < totalMs) {
-          requestAnimationFrame(tick);
-        } else {
-          resolve();
+          if (elapsed < totalMs) {
+            window.setTimeout(tick, frameIntervalMs);
+          } else {
+            finishLoop();
+          }
+        } catch (err) {
+          failLoop(err);
         }
       };
 
-      requestAnimationFrame(tick);
+      window.setTimeout(tick, 0);
     });
   } finally {
     if (audioSourceNode) {
@@ -428,8 +453,18 @@ export async function renderCanvasLipSyncVideo({
   }
 
   onProgress(99, 'Finalizing downloadable Talking / Singing video...', 0);
-  recorder.stop();
-  const blob = await recordingFinished;
+  if (recorder.state !== 'inactive') {
+    recorder.stop();
+  }
+  const blob = await Promise.race([
+    recordingFinished,
+    new Promise<Blob>((resolve) => {
+      window.setTimeout(() => {
+        const cleanMime = mimeType.split(';')[0];
+        resolve(new Blob(chunks, { type: cleanMime }));
+      }, 3500);
+    }),
+  ]);
   const mediaUrl = URL.createObjectURL(blob);
   onProgress(100, 'Lip-Sync video ready.', 0);
 

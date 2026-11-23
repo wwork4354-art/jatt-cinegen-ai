@@ -150,7 +150,11 @@ async function fetchAndValidateImageUrl(
   timeoutMs = 15000
 ): Promise<FetchedAiImageResult> {
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  let didTimeout = false;
+  const timer = window.setTimeout(() => {
+    didTimeout = true;
+    controller.abort();
+  }, timeoutMs);
 
   let response: Response;
   try {
@@ -160,9 +164,13 @@ async function fetchAndValidateImageUrl(
       referrerPolicy: 'no-referrer',
       signal: controller.signal,
     });
-  } catch {
+  } catch (err) {
     window.clearTimeout(timer);
-    const directImg = await loadImageDirectCrossOrigin(url, timeoutMs);
+    if (didTimeout) {
+      throw new Error(`${providerLabel}: request timed out after ${Math.round(timeoutMs / 1000)}s`);
+    }
+    const directImg = await loadImageDirectCrossOrigin(url, Math.min(8000, timeoutMs));
+    void err;
     const reason = isRateLimitOrRefusedBanner(
       directImg,
       expectedWidth,
@@ -373,7 +381,7 @@ async function tryPollinationsKeyframe(params: {
         fetchHeight,
         true,
         attempt.label,
-        15000
+        10000
       );
       return {
         img: result.img,
