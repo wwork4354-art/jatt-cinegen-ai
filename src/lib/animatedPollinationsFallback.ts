@@ -2,6 +2,7 @@ import {
   fetchThreeVideoKeyframesParallel,
   type FastKeyframeResult,
 } from './freeImageWaterfall';
+import { enhanceTextToVideoPromptFraming } from '../../shared/videoPromptFraming';
 import type {
   AspectRatio,
   CameraMotionId,
@@ -147,6 +148,7 @@ function drawCoverMotion(
 }
 
 async function resolveScenePrompts(prompt: string, style: StylePresetId): Promise<[string, string, string]> {
+  const framedBase = enhanceTextToVideoPromptFraming(prompt);
   try {
     const controller = new AbortController();
     const timer = window.setTimeout(() => controller.abort(), 4000);
@@ -154,13 +156,17 @@ async function resolveScenePrompts(prompt: string, style: StylePresetId): Promis
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       signal: controller.signal,
-      body: JSON.stringify({ prompt, style }),
+      body: JSON.stringify({ prompt: framedBase, style }),
     });
     window.clearTimeout(timer);
     if (res.ok) {
       const data = (await res.json()) as { scenes?: string[] };
       if (Array.isArray(data.scenes) && data.scenes.length >= 3) {
-        return [data.scenes[0], data.scenes[1], data.scenes[2]];
+        return [
+          enhanceTextToVideoPromptFraming(data.scenes[0]),
+          enhanceTextToVideoPromptFraming(data.scenes[1]),
+          enhanceTextToVideoPromptFraming(data.scenes[2]),
+        ];
       }
     }
   } catch {
@@ -168,9 +174,9 @@ async function resolveScenePrompts(prompt: string, style: StylePresetId): Promis
   }
 
   return [
-    `Wide establishing shot, ${prompt}, atmospheric depth`,
-    `Dynamic medium action shot in motion, ${prompt}, dramatic lighting`,
-    `Cinematic close-up finale, ${prompt}, crisp golden rim light`,
+    enhanceTextToVideoPromptFraming(`Wide establishing shot, ${framedBase}, atmospheric depth`),
+    enhanceTextToVideoPromptFraming(`Dynamic action shot in motion, ${framedBase}, dramatic lighting`),
+    enhanceTextToVideoPromptFraming(`Cinematic finale shot, ${framedBase}, crisp golden rim light`),
   ];
 }
 

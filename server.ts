@@ -12,6 +12,12 @@ import {
   type HfAspectRatio,
   type HfVideoMode,
 } from './server/hfVideoService.ts';
+import {
+  buildVideoNegativePrompt,
+  detectPersonOrCharacter,
+  enhanceTextToVideoPromptFraming,
+  isCloseUpRequested,
+} from './shared/videoPromptFraming.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,19 +98,30 @@ async function startServer() {
       const cameraHint =
         cameraMotion && mode !== 'text-to-image' ? `Desired camera movement: ${cameraMotion}.` : '';
 
+      const characterFramingRule =
+        mode !== 'text-to-image' &&
+        detectPersonOrCharacter(cleanPrompt) &&
+        !isCloseUpRequested(cleanPrompt)
+          ? ' Because the scene includes a person or character without a close-up request, include full-body framing from head to toe, wide angle, front-facing view, clear detailed face, and both arms and hands clearly visible.'
+          : '';
+
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
         contents: `Enhance this creative prompt for ${targetFormat}: "${cleanPrompt}". ${styleHint} ${cameraHint}`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           systemInstruction:
-            'You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive, production-ready prompt under 75 words. Focus on concrete visual subjects, lighting, atmosphere, lens/texture details, and natural motion when video is requested. Return ONLY the enhanced prompt text with no quotes, no preamble, and no markdown.',
+            `You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive, production-ready prompt under 75 words. Focus on concrete visual subjects, lighting, atmosphere, lens/texture details, and natural motion when video is requested.${characterFramingRule} Return ONLY the enhanced prompt text with no quotes, no preamble, and no markdown.`,
         },
       });
 
-      const enhancedPrompt = (response.text ?? '').trim().replace(/^["']|["']$/g, '');
+      let enhancedPrompt = (response.text ?? '').trim().replace(/^["']|["']$/g, '');
       if (!enhancedPrompt) {
         throw new Error('Model returned an empty prompt enhancement.');
+      }
+
+      if (mode === 'text-to-video' || !mode) {
+        enhancedPrompt = enhanceTextToVideoPromptFraming(enhancedPrompt);
       }
 
       res.json({ enhancedPrompt });
@@ -204,9 +221,15 @@ async function startServer() {
       const styleHint = style && style !== 'none' ? `Visual style: ${style}.` : '';
       const cameraHint = cameraMotion ? `Camera feel: ${cameraMotion}.` : '';
 
+      const needsFullBody =
+        detectPersonOrCharacter(cleanPrompt) && !isCloseUpRequested(cleanPrompt);
+      const framingNote = needsFullBody
+        ? ' Keep every scene framed as a wide-angle full body shot from head to toe facing forward with clear detailed face and both arms and hands clearly visible.'
+        : '';
+
       const response = await ai.models.generateContent({
         model: 'gemini-4-hydrogen',
-        contents: `Break this single video idea into 3 connected sequential 5-second film scenes in clear descriptive English (Scene 1: Beginning, Scene 2: Action/Middle, Scene 3: Ending). Keep characters, setting, and lighting visually consistent across all 3 scenes. Prompt: "${cleanPrompt}". ${styleHint} ${cameraHint}`,
+        contents: `Break this single video idea into 3 connected sequential 5-second film scenes in clear descriptive English (Scene 1: Beginning, Scene 2: Action/Middle, Scene 3: Ending). Keep characters, setting, and lighting visually consistent across all 3 scenes.${framingNote} Prompt: "${cleanPrompt}". ${styleHint} ${cameraHint}`,
         config: {
           thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
           responseMimeType: 'application/json',
@@ -231,7 +254,11 @@ async function startServer() {
         throw new Error('Could not generate 3 sequential scenes.');
       }
 
-      res.json({ scenes: parsed.scenes.slice(0, 3) });
+      const framedScenes = parsed.scenes
+        .slice(0, 3)
+        .map((scene) => (needsFullBody ? enhanceTextToVideoPromptFraming(scene) : scene));
+
+      res.json({ scenes: framedScenes });
     } catch (error) {
       const parsed = parseGeminiErrorMessage(error);
       res.status(parsed.status).json({ error: parsed.message });
@@ -251,6 +278,7 @@ async function startServer() {
       hfToken,
       siliconFlowKey,
       pollinationsKey,
+      agnesKey,
     } = req.body as {
       prompt?: string;
       mode?: HfVideoMode;
@@ -262,6 +290,7 @@ async function startServer() {
       hfToken?: string;
       siliconFlowKey?: string;
       pollinationsKey?: string;
+      agnesKey?: string;
     };
 
     const cleanPrompt = (prompt || '').trim();
@@ -286,7 +315,12 @@ async function startServer() {
         ? 'photorealistic live action footage, natural camera motion, sharp texture'
         : '';
 
-    const fullPrompt = styleSuffix ? `${cleanPrompt}, ${styleSuffix}` : cleanPrompt;
+    const framedPrompt =
+      safeMode === 'text-to-video'
+        ? enhanceTextToVideoPromptFraming(cleanPrompt)
+        : cleanPrompt;
+    const fullPrompt = styleSuffix ? `${framedPrompt}, ${styleSuffix}` : framedPrompt;
+    const negativePrompt = buildVideoNegativePrompt(framedPrompt);
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -338,6 +372,7 @@ async function startServer() {
       await Promise.race([
         generateSmartMultiEngineVideo({
           prompt: fullPrompt,
+          negativePrompt,
           mode: safeMode,
           aspectRatio: safeRatio,
           duration: safeDuration,
@@ -347,6 +382,7 @@ async function startServer() {
           hfToken,
           siliconFlowKey,
           pollinationsKey,
+          agnesKey,
           isAborted: () => aborted,
           onEvent: (event) => {
             sendEvent(event);

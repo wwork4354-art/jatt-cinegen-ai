@@ -1,6 +1,10 @@
 import { Client, handle_file } from '@gradio/client';
 import { InferenceClient } from '@huggingface/inference';
 import type { AspectRatio } from '../types/studio';
+import {
+  buildVideoNegativePrompt,
+  enhanceTextToVideoPromptFraming,
+} from '../../shared/videoPromptFraming';
 
 export interface ClientGpuVideoResult {
   blob: Blob;
@@ -425,12 +429,14 @@ async function tryDirectBrowserPollinationsVideo(params: {
 async function tryDirectBrowserSiliconFlowVideo(params: {
   siliconFlowKey: string;
   prompt: string;
+  negativePrompt?: string;
   mode: 'text-to-video' | 'image-to-video';
   aspectRatio: AspectRatio;
   imageDataUrl?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult> {
-  const { siliconFlowKey, prompt, mode, aspectRatio, imageDataUrl, onProgress } = params;
+  const { siliconFlowKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, onProgress } =
+    params;
   onProgress(20, 'Routing to Qwen Wan 2.1 (SiliconFlow API)...');
 
   const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
@@ -456,6 +462,7 @@ async function tryDirectBrowserSiliconFlowVideo(params: {
           body: JSON.stringify({
             model: isI2v ? 'Wan-AI/Wan2.1-I2V-14B-720P' : 'Wan-AI/Wan2.1-T2V-14B',
             prompt,
+            ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
             image_size: imageSize,
             ...(isI2v && imageDataUrl ? { image: imageDataUrl } : {}),
           }),
@@ -531,12 +538,13 @@ async function tryDirectBrowserSiliconFlowVideo(params: {
 async function tryDirectBrowserHuggingFaceInferenceVideo(params: {
   hfToken: string;
   prompt: string;
+  negativePrompt?: string;
   mode: 'text-to-video' | 'image-to-video';
   aspectRatio: AspectRatio;
   imageBlob?: Blob | null;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult> {
-  const { hfToken, prompt, mode, aspectRatio, imageBlob, onProgress } = params;
+  const { hfToken, prompt, negativePrompt, mode, aspectRatio, imageBlob, onProgress } = params;
   const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
   const height = aspectRatio === '9:16' ? 768 : aspectRatio === '1:1' ? 512 : 448;
   const client = new InferenceClient(hfToken);
@@ -552,7 +560,12 @@ async function tryDirectBrowserHuggingFaceInferenceVideo(params: {
             model: 'Wan-AI/Wan2.1-I2V-14B-720P',
             provider: 'auto',
             inputs: imageBlob,
-            parameters: { prompt, num_inference_steps: 20, guidance_scale: 5.0 },
+            parameters: {
+              prompt,
+              ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+              num_inference_steps: 20,
+              guidance_scale: 5.0,
+            },
           },
           { signal: controller.signal }
         ),
@@ -597,6 +610,7 @@ async function tryDirectBrowserHuggingFaceInferenceVideo(params: {
               num_frames: 41,
               num_inference_steps: 20,
               guidance_scale: model.id.includes('LTX') ? 3.0 : 5.0,
+              ...(negativePrompt ? { negative_prompt: [negativePrompt] } : {}),
             },
           },
           { signal: controller.signal }
@@ -626,32 +640,198 @@ async function tryDirectBrowserHuggingFaceInferenceVideo(params: {
   throw new Error(lastErr);
 }
 
+async function tryDirectBrowserAgnesAiVideo(params: {
+  agnesKey: string;
+  prompt: string;
+  mode: 'text-to-video' | 'image-to-video';
+  aspectRatio: AspectRatio;
+  duration?: '5s' | '10s' | '15s';
+  imageDataUrl?: string;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { agnesKey, prompt, mode, aspectRatio, duration, imageDataUrl, onProgress } = params;
+  onProgress(24, 'Routing to Agnes AI (Agnes-Video-2.5)...');
+
+  const width = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 768 : 1280;
+  const height = aspectRatio === '9:16' ? 1280 : aspectRatio === '1:1' ? 768 : 720;
+  const durationSeconds = duration === '10s' || duration === '15s' ? 10 : 5;
+
+  const submitBody: Record<string, unknown> = {
+    model: 'agnes-video-2.5',
+    prompt,
+    aspect_ratio: aspectRatio,
+    duration: durationSeconds,
+  };
+  if (mode === 'image-to-video' && imageDataUrl) {
+    submitBody.image_url = imageDataUrl;
+  }
+
+  const submitRes = await withTimeout(
+    fetch('https://apihub.agnes-ai.com/v1/videos', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${agnesKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(submitBody),
+    }),
+    12000,
+    'Agnes AI submit'
+  );
+
+  if (!submitRes.ok) {
+    throw new Error(`Agnes AI HTTP ${submitRes.status}`);
+  }
+
+  const created = (await submitRes.json()) as {
+    video_id?: string;
+    id?: string;
+    task_id?: string;
+    url?: string;
+    video_url?: string;
+    data?: { video_id?: string; id?: string; url?: string; video_url?: string };
+  };
+
+  const immediateUrl =
+    created.url || created.video_url || created.data?.url || created.data?.video_url;
+  if (immediateUrl && immediateUrl.startsWith('http')) {
+    onProgress(88, 'Downloading generated MP4 from Agnes AI...');
+    const mediaRes = await withTimeout(fetch(immediateUrl), 25000, 'Download Agnes AI MP4');
+    if (!mediaRes.ok) throw new Error(`Failed to fetch Agnes AI MP4 (${mediaRes.status})`);
+    const blob = await mediaRes.blob();
+    return {
+      blob,
+      mediaUrl: URL.createObjectURL(blob),
+      mimeType: blob.type || 'video/mp4',
+      width,
+      height,
+      engineLabel: 'Rendered via Agnes AI (Agnes-Video-2.5)',
+    };
+  }
+
+  const videoId =
+    created.video_id || created.id || created.task_id || created.data?.video_id || created.data?.id;
+  if (!videoId) {
+    throw new Error('Agnes AI returned no video_id');
+  }
+
+  const pollUrls = [
+    `https://apihub.agnes-ai.com/v1/agnesapi?video_id=${encodeURIComponent(videoId)}&model_name=agnes-video-2.5`,
+    `https://apihub.agnes-ai.com/agnesapi?video_id=${encodeURIComponent(videoId)}&model_name=agnes-video-2.5`,
+  ];
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 42000) {
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    onProgress(Math.min(82, 34 + elapsedSec), 'Generating motion frames via Agnes-Video-2.5...');
+    await new Promise((r) => setTimeout(r, 3500));
+
+    let resultJson: Record<string, unknown> | null = null;
+    for (const pollUrl of pollUrls) {
+      try {
+        const pollRes = await withTimeout(
+          fetch(pollUrl, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${agnesKey}` },
+          }),
+          8000,
+          'Agnes AI status'
+        );
+        if (pollRes.status === 404) continue;
+        if (!pollRes.ok) throw new Error(`Agnes AI HTTP ${pollRes.status}`);
+        resultJson = (await pollRes.json()) as Record<string, unknown>;
+        break;
+      } catch (err) {
+        if (pollUrl === pollUrls[pollUrls.length - 1]) {
+          throw err;
+        }
+      }
+    }
+
+    if (!resultJson) continue;
+
+    const dataObj =
+      resultJson.data && typeof resultJson.data === 'object'
+        ? (resultJson.data as Record<string, unknown>)
+        : undefined;
+    const outputObj =
+      resultJson.output && typeof resultJson.output === 'object'
+        ? (resultJson.output as Record<string, unknown>)
+        : undefined;
+    const videosArr = Array.isArray(resultJson.videos)
+      ? (resultJson.videos as Array<Record<string, unknown>>)
+      : undefined;
+
+    const status = String(resultJson.status || dataObj?.status || '').toLowerCase();
+    const videoUrl =
+      (typeof resultJson.url === 'string' && resultJson.url) ||
+      (typeof resultJson.video_url === 'string' && resultJson.video_url) ||
+      (typeof dataObj?.url === 'string' && dataObj.url) ||
+      (typeof dataObj?.video_url === 'string' && dataObj.video_url) ||
+      (typeof outputObj?.url === 'string' && outputObj.url) ||
+      (typeof videosArr?.[0]?.url === 'string' && videosArr[0].url) ||
+      '';
+
+    if (videoUrl && videoUrl.startsWith('http')) {
+      onProgress(88, 'Downloading generated MP4 from Agnes AI (Agnes-Video-2.5)...');
+      const mediaRes = await withTimeout(fetch(videoUrl), 25000, 'Download Agnes AI MP4');
+      if (!mediaRes.ok) throw new Error(`Failed to fetch Agnes AI MP4 (${mediaRes.status})`);
+      const blob = await mediaRes.blob();
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: 'Rendered via Agnes AI (Agnes-Video-2.5)',
+      };
+    }
+
+    if (status === 'failed' || status === 'error' || status === 'cancelled' || status === 'canceled') {
+      throw new Error(
+        typeof resultJson.message === 'string' ? resultJson.message : 'Agnes AI job failed'
+      );
+    }
+  }
+
+  throw new Error('Agnes AI (Agnes-Video-2.5) timed out');
+}
+
 export async function runDirectBrowserAiVideo(params: {
   prompt: string;
   mode: 'text-to-video' | 'image-to-video';
   aspectRatio: AspectRatio;
+  duration?: '5s' | '10s' | '15s';
   imageDataUrl?: string;
   geminiKey?: string;
   hfToken?: string;
   siliconFlowKey?: string;
   pollinationsKey?: string;
+  agnesKey?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult | null> {
   const {
     prompt,
     mode,
     aspectRatio,
+    duration,
     imageDataUrl,
     geminiKey,
     hfToken,
     siliconFlowKey,
     pollinationsKey,
+    agnesKey,
     onProgress,
   } = params;
   const resolvedGemini = geminiKey?.trim() || '';
   const resolvedHf = hfToken?.trim() || '';
   const resolvedSf = siliconFlowKey?.trim() || '';
   const resolvedPollinations = pollinationsKey?.trim() || '';
+  const resolvedAgnes = agnesKey?.trim() || '';
+
+  const effectivePrompt =
+    mode === 'text-to-video' ? enhanceTextToVideoPromptFraming(prompt) : prompt;
+  const negativePrompt = buildVideoNegativePrompt(effectivePrompt);
 
   const imageBlob =
     mode === 'image-to-video' && imageDataUrl ? await resolveInputBlob(imageDataUrl) : null;
@@ -661,7 +841,8 @@ export async function runDirectBrowserAiVideo(params: {
     try {
       return await tryDirectBrowserSiliconFlowVideo({
         siliconFlowKey: resolvedSf,
-        prompt,
+        prompt: effectivePrompt,
+        negativePrompt,
         mode,
         aspectRatio,
         imageDataUrl,
@@ -677,7 +858,8 @@ export async function runDirectBrowserAiVideo(params: {
     try {
       return await tryDirectBrowserHuggingFaceInferenceVideo({
         hfToken: resolvedHf,
-        prompt,
+        prompt: effectivePrompt,
+        negativePrompt,
         mode,
         aspectRatio,
         imageBlob,
@@ -688,12 +870,29 @@ export async function runDirectBrowserAiVideo(params: {
     }
   }
 
-  // 3. Google Veo 2.0
+  // 3. Agnes AI (Agnes-Video-2.5)
+  if (resolvedAgnes) {
+    try {
+      return await tryDirectBrowserAgnesAiVideo({
+        agnesKey: resolvedAgnes,
+        prompt: effectivePrompt,
+        mode,
+        aspectRatio,
+        duration,
+        imageDataUrl,
+        onProgress,
+      });
+    } catch {
+      // Proceed to Google Veo / HF Gradio GPUs
+    }
+  }
+
+  // 4. Google Veo 2.0
   if (resolvedGemini) {
     try {
       return await tryDirectBrowserGoogleVeo({
         geminiKey: resolvedGemini,
-        prompt,
+        prompt: effectivePrompt,
         mode,
         aspectRatio,
         imageDataUrl,
@@ -718,8 +917,8 @@ export async function runDirectBrowserAiVideo(params: {
           endpoint: '/image_to_video',
           initialMessage: 'Sending photo to AI GPU for fast 16fps motion...',
           payload: {
-            prompt,
-            negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
+            prompt: effectivePrompt,
+            negative_prompt: negativePrompt,
             input_image_filepath: handle_file(imageBlob),
             input_video_filepath: null,
             height_ui: height,
@@ -762,10 +961,10 @@ export async function runDirectBrowserAiVideo(params: {
           initialMessage: 'Routing to Qwen Wan 2.1 AI GPU (16fps fast)...',
           payload: {
             input_image: handle_file(imageBlob),
-            prompt,
+            prompt: effectivePrompt,
             height: wanH,
             width: wanW,
-            negative_prompt: 'blurry, static, jittery, distorted, watermark, text, low quality',
+            negative_prompt: negativePrompt,
             duration_seconds: 2,
             guidance_scale: 1,
             steps: 4,
@@ -835,8 +1034,8 @@ export async function runDirectBrowserAiVideo(params: {
         endpoint: '/text_to_video',
         initialMessage: 'Connecting to LTX-Video AI GPU (16fps fast)...',
         payload: {
-          prompt,
-          negative_prompt: 'worst quality, inconsistent motion, blurry, jittery, distorted',
+          prompt: effectivePrompt,
+          negative_prompt: negativePrompt,
           input_image_filepath: null,
           input_video_filepath: null,
           height_ui: height,
@@ -875,7 +1074,7 @@ export async function runDirectBrowserAiVideo(params: {
         endpoint: '/generate',
         initialMessage: 'Connecting to CogVideoX-2B AI GPU (fast steps)...',
         payload: {
-          prompt,
+          prompt: effectivePrompt,
           num_inference_steps: 16,
           guidance_scale: 6,
         },
@@ -900,7 +1099,7 @@ export async function runDirectBrowserAiVideo(params: {
   if (resolvedPollinations) {
     try {
       return await tryDirectBrowserPollinationsVideo({
-        prompt,
+        prompt: effectivePrompt,
         aspectRatio,
         imageDataUrl: mode === 'image-to-video' ? imageDataUrl : undefined,
         pollinationsKey: resolvedPollinations,

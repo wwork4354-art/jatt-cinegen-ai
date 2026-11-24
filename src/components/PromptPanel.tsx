@@ -73,6 +73,8 @@ interface PromptPanelProps {
   onVideoSourceModeChange: (mode: VideoSourceMode) => void;
   hfToken: string;
   onHfTokenChange: (token: string) => void;
+  agnesApiKey: string;
+  onAgnesApiKeyChange: (key: string) => void;
   hasGpuKeys: boolean;
   onOpenEngineVault: () => void;
   customBackendUrl: string;
@@ -171,6 +173,8 @@ export function PromptPanel({
   onVideoSourceModeChange,
   hfToken,
   onHfTokenChange,
+  agnesApiKey,
+  onAgnesApiKeyChange,
   hasGpuKeys,
   onOpenEngineVault,
   customBackendUrl,
@@ -212,6 +216,7 @@ export function PromptPanel({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isEngineSettingsOpen, setIsEngineSettingsOpen] = useState(false);
   const [showHfToken, setShowHfToken] = useState(false);
+  const [showAgnesKey, setShowAgnesKey] = useState(false);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
     ok?: boolean;
@@ -1218,7 +1223,7 @@ export function PromptPanel({
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {videoSourceMode === 'hf-gpu'
-                    ? 'Auto-routes SiliconFlow Wan 2.1 → HF Inference (Wan 2.1 · CogVideoX-5b · LTX-Video) → Google Veo → Animated Pollinations fallback.'
+                    ? 'Auto-routes SiliconFlow Wan 2.1 → HF Inference (Wan 2.1 · CogVideoX-5b · LTX) → Agnes AI (Agnes-Video-2.5) → Google Veo → Animated Pollinations fallback.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>
@@ -1237,7 +1242,10 @@ export function PromptPanel({
                   onClick={() => setIsEngineSettingsOpen((open) => !open)}
                   aria-expanded={isEngineSettingsOpen || videoSourceMode === 'custom-backend'}
                   className={`inline-flex items-center gap-1 rounded-lg border px-2 py-1.5 text-[11px] font-semibold transition-colors ${
-                    isEngineSettingsOpen || videoSourceMode === 'custom-backend' || hfToken.trim()
+                    isEngineSettingsOpen ||
+                    videoSourceMode === 'custom-backend' ||
+                    hfToken.trim() ||
+                    agnesApiKey.trim()
                       ? 'border-cyan-400/45 bg-cyan-400/10 text-cyan-200'
                       : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
                   }`}
@@ -1266,7 +1274,7 @@ export function PromptPanel({
                   Real Text-to-Video AI APIs
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Wan 2.1 · CogVideoX · LTX · Veo
+                  Wan 2.1 · Agnes 2.5 · CogVideoX · Veo
                 </span>
               </button>
 
@@ -1338,6 +1346,54 @@ export function PromptPanel({
                   </div>
                   <p className="text-[11px] text-slate-500">
                     Saved locally in your browser. Unlocks faster priority on CogVideoX-2B, LTX-Video &amp; HunyuanVideo when free quotas allow.
+                  </p>
+                </div>
+
+                {/* 5. Agnes AI Free Video Key (Agnes-Video-2.5) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-agnes-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                      5. Agnes AI Free Video Key (Agnes-Video-2.5)
+                    </label>
+                    {agnesApiKey.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => onAgnesApiKeyChange('')}
+                        className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                      >
+                        Clear
+                      </button>
+                    )}
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-agnes-key"
+                      type={showAgnesKey ? 'text' : 'password'}
+                      value={agnesApiKey}
+                      onChange={(e) => onAgnesApiKeyChange(e.target.value)}
+                      placeholder="agnes_... (VITE_AGNES_API_KEY optional)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowAgnesKey((s) => !s)}
+                      aria-label={showAgnesKey ? 'Hide Agnes AI key' : 'Show Agnes AI key'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showAgnesKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Saved in Engine Vault / localStorage. Adds Agnes-Video-2.5 capacity alongside SiliconFlow and Hugging Face.
                   </p>
                 </div>
 

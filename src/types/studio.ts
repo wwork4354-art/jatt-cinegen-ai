@@ -35,6 +35,7 @@ export interface EngineVaultKeys {
   hfToken: string;
   siliconFlowKey: string;
   pollinationsKey?: string;
+  agnesKey?: string;
 }
 
 export interface StylePresetOption {

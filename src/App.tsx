@@ -14,6 +14,7 @@ import {
 } from './lib/clientGpuVideo';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
 import { renderAnimatedPollinationsFallback } from './lib/animatedPollinationsFallback';
+import { enhanceTextToVideoPromptFraming } from '../shared/videoPromptFraming';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
 import { getVoiceLanguageById, translatePromptToEnglish } from './lib/voiceLanguages';
@@ -92,6 +93,7 @@ export default function App() {
     (import.meta.env.VITE_POLLINATIONS_KEY as string | undefined) ??
     (import.meta.env.VITE_POLLINATIONS_API_KEY as string | undefined) ??
     '';
+  const envAgnes = (import.meta.env.VITE_AGNES_API_KEY as string | undefined) ?? '';
 
   const [hfToken, setHfToken] = useState<string>(() => {
     try {
@@ -110,6 +112,7 @@ export default function App() {
           hfToken: parsed.hfToken || localStorage.getItem(HF_TOKEN_STORAGE_KEY) || envHf,
           siliconFlowKey: parsed.siliconFlowKey || envSf,
           pollinationsKey: parsed.pollinationsKey || envPollinations,
+          agnesKey: parsed.agnesKey || envAgnes,
         };
       }
     } catch {
@@ -120,6 +123,7 @@ export default function App() {
       hfToken: envHf,
       siliconFlowKey: envSf,
       pollinationsKey: envPollinations,
+      agnesKey: envAgnes,
     };
   });
   const [isEngineVaultOpen, setIsEngineVaultOpen] = useState(false);
@@ -602,11 +606,12 @@ export default function App() {
     const activeGeminiKey = (engineVaultKeys.geminiKey || envGemini).trim();
     const activeSiliconKey = (engineVaultKeys.siliconFlowKey || envSf).trim();
     const activePollinationsKey = (engineVaultKeys.pollinationsKey || envPollinations).trim();
+    const activeAgnesKey = (engineVaultKeys.agnesKey || envAgnes).trim();
 
     startTimer(
       targetMode === 'image-to-video'
         ? 'Routing photo to real Image-to-Video AI (Wan 2.1 / LTX-Video)...'
-        : 'Routing to real Text-to-Video AI (Wan 2.1 / CogVideoX / LTX-Video)...'
+        : 'Routing to real Text-to-Video AI (Wan 2.1 / CogVideoX / Agnes 2.5)...'
     );
 
     let generatedRealMp4 = false;
@@ -619,7 +624,11 @@ export default function App() {
         trimmedPrompt,
         voiceLanguageId
       );
-      const effectivePrompt = englishPrompt || trimmedPrompt;
+      const translatedBase = englishPrompt || trimmedPrompt;
+      const effectivePrompt =
+        targetMode === 'text-to-video'
+          ? enhanceTextToVideoPromptFraming(translatedBase)
+          : translatedBase;
 
       if (targetMode === 'image-to-video' && uploadedImageUrl?.startsWith('blob:')) {
         const fetched = await fetch(uploadedImageUrl);
@@ -644,6 +653,7 @@ export default function App() {
             hfToken: activeHfToken || undefined,
             siliconFlowKey: activeSiliconKey || undefined,
             pollinationsKey: activePollinationsKey || undefined,
+            agnesKey: activeAgnesKey || undefined,
           }),
         });
 
@@ -752,17 +762,19 @@ export default function App() {
         window.clearTimeout(hfStreamTimer);
       }
 
-      // Direct Browser SiliconFlow / HF Inference / Veo / Gradio fallback (handles Vercel static deployments where /api/* returns 404)
+      // Direct Browser SiliconFlow / HF Inference / Agnes AI / Veo / Gradio fallback (handles Vercel static deployments where /api/* returns 404)
       if (!generatedRealMp4 && shouldTryDirectBrowser) {
         const directResult = await runDirectBrowserAiVideo({
           prompt: effectivePrompt,
           mode: targetMode,
           aspectRatio,
+          duration,
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
           geminiKey: activeGeminiKey,
           hfToken: activeHfToken,
           siliconFlowKey: activeSiliconKey,
           pollinationsKey: activePollinationsKey,
+          agnesKey: activeAgnesKey,
           onProgress: (percent, statusMessage) => {
             setProgress((prev) =>
               prev.active ? { ...prev, percent, statusMessage } : prev
@@ -1179,6 +1191,7 @@ export default function App() {
     (engineVaultKeys.hfToken || hfToken || envHf).trim(),
     (engineVaultKeys.siliconFlowKey || envSf).trim(),
     (engineVaultKeys.pollinationsKey || envPollinations).trim(),
+    (engineVaultKeys.agnesKey || envAgnes).trim(),
   ].filter(Boolean).length;
 
   return (
@@ -1268,9 +1281,14 @@ export default function App() {
                     setHfToken(nextToken);
                     setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
                   }}
+                  agnesApiKey={engineVaultKeys.agnesKey || envAgnes}
+                  onAgnesApiKeyChange={(nextKey) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, agnesKey: nextKey }));
+                  }}
                   hasGpuKeys={Boolean(
                     (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
                       (engineVaultKeys.siliconFlowKey || envSf).trim() ||
+                      (engineVaultKeys.agnesKey || envAgnes).trim() ||
                       (engineVaultKeys.geminiKey || envGemini).trim()
                   )}
                   onOpenEngineVault={() => setIsEngineVaultOpen(true)}
@@ -1386,11 +1404,12 @@ export default function App() {
       />
 
       <EngineVaultModal
-        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${customBackendUrl}`}
+        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${engineVaultKeys.pollinationsKey ?? ''}-${engineVaultKeys.agnesKey ?? ''}-${customBackendUrl}`}
         isOpen={isEngineVaultOpen}
         keys={{
           ...engineVaultKeys,
           hfToken: engineVaultKeys.hfToken || hfToken,
+          agnesKey: engineVaultKeys.agnesKey || envAgnes,
         }}
         customBackendUrl={customBackendUrl}
         onSave={(nextKeys, nextBackendUrl) => {
