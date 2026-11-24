@@ -1,4 +1,5 @@
 import { Client, handle_file } from '@gradio/client';
+import { InferenceClient } from '@huggingface/inference';
 import type { AspectRatio } from '../types/studio';
 
 export interface ClientGpuVideoResult {
@@ -169,6 +170,7 @@ async function runBrowserGradioJob(params: {
       try {
         for await (const rawMsg of submission) {
           if (settled) break;
+          if (!rawMsg || typeof rawMsg !== 'object') continue;
           if (rawMsg.type === 'status') {
             const stage = String(rawMsg.stage || '');
             const msgText = typeof rawMsg.message === 'string' ? rawMsg.message : '';
@@ -420,6 +422,210 @@ async function tryDirectBrowserPollinationsVideo(params: {
   throw new Error(lastError);
 }
 
+async function tryDirectBrowserSiliconFlowVideo(params: {
+  siliconFlowKey: string;
+  prompt: string;
+  mode: 'text-to-video' | 'image-to-video';
+  aspectRatio: AspectRatio;
+  imageDataUrl?: string;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { siliconFlowKey, prompt, mode, aspectRatio, imageDataUrl, onProgress } = params;
+  onProgress(20, 'Routing to Qwen Wan 2.1 (SiliconFlow API)...');
+
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const imageSize =
+    aspectRatio === '9:16' ? '720x1280' : aspectRatio === '1:1' ? '960x960' : '1280x720';
+  const [wStr, hStr] = imageSize.split('x');
+  const width = Number(wStr);
+  const height = Number(hStr);
+
+  const hosts = ['https://api.siliconflow.com', 'https://api.siliconflow.cn'];
+  let activeHost = '';
+  let requestId = '';
+
+  for (const host of hosts) {
+    try {
+      const res = await withTimeout(
+        fetch(`${host}/v1/video/submit`, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${siliconFlowKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            model: isI2v ? 'Wan-AI/Wan2.1-I2V-14B-720P' : 'Wan-AI/Wan2.1-T2V-14B',
+            prompt,
+            image_size: imageSize,
+            ...(isI2v && imageDataUrl ? { image: imageDataUrl } : {}),
+          }),
+        }),
+        10000,
+        'SiliconFlow submit'
+      );
+      if (!res.ok) continue;
+      const data = (await res.json()) as { requestId?: string };
+      if (data.requestId) {
+        activeHost = host;
+        requestId = data.requestId;
+        break;
+      }
+    } catch {
+      // Try next host
+    }
+  }
+
+  if (!activeHost || !requestId) {
+    throw new Error('SiliconFlow video API unavailable');
+  }
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 50000) {
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    onProgress(Math.min(82, 32 + elapsedSec), 'Generating Qwen Wan 2.1 motion video...');
+    await new Promise((r) => setTimeout(r, 3500));
+
+    const statusRes = await withTimeout(
+      fetch(`${activeHost}/v1/video/status`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${siliconFlowKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ requestId }),
+      }),
+      8000,
+      'SiliconFlow status'
+    );
+    if (!statusRes.ok) throw new Error(`SiliconFlow HTTP ${statusRes.status}`);
+
+    const statusData = (await statusRes.json()) as {
+      status?: string;
+      reason?: string;
+      results?: { videos?: Array<{ url?: string }> };
+    };
+    if (statusData.status === 'Succeed') {
+      const videoUrl = statusData.results?.videos?.[0]?.url;
+      if (!videoUrl) throw new Error('SiliconFlow completed without a video URL');
+      onProgress(88, 'Downloading generated MP4 from Qwen Wan 2.1...');
+      const mediaRes = await withTimeout(fetch(videoUrl), 25000, 'Download Wan 2.1 MP4');
+      if (!mediaRes.ok) throw new Error(`Failed to fetch Wan 2.1 MP4 (${mediaRes.status})`);
+      const blob = await mediaRes.blob();
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: 'Rendered via Qwen Wan 2.1 (SiliconFlow)',
+      };
+    }
+    if (statusData.status === 'Failed') {
+      throw new Error(statusData.reason || 'SiliconFlow video job failed');
+    }
+  }
+
+  throw new Error('SiliconFlow Wan 2.1 timed out');
+}
+
+async function tryDirectBrowserHuggingFaceInferenceVideo(params: {
+  hfToken: string;
+  prompt: string;
+  mode: 'text-to-video' | 'image-to-video';
+  aspectRatio: AspectRatio;
+  imageBlob?: Blob | null;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { hfToken, prompt, mode, aspectRatio, imageBlob, onProgress } = params;
+  const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
+  const height = aspectRatio === '9:16' ? 768 : aspectRatio === '1:1' ? 512 : 448;
+  const client = new InferenceClient(hfToken);
+
+  if (mode === 'image-to-video' && imageBlob) {
+    onProgress(26, 'Animating reference photo via HF Inference API (Wan2.1-I2V)...');
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 32000);
+    try {
+      const blob = await withTimeout(
+        client.imageToVideo(
+          {
+            model: 'Wan-AI/Wan2.1-I2V-14B-720P',
+            provider: 'auto',
+            inputs: imageBlob,
+            parameters: { prompt, num_inference_steps: 20, guidance_scale: 5.0 },
+          },
+          { signal: controller.signal }
+        ),
+        32000,
+        'Wan2.1-I2V'
+      );
+      if (blob.size < 8000) throw new Error('HF I2V returned empty video');
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: 'Rendered via HF Inference (Wan2.1-I2V)',
+      };
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  const models = [
+    { id: 'Wan-AI/Wan2.1-T2V-1.3B', badge: 'Rendered via HF Inference (Wan2.1-1.3B)' },
+    { id: 'Wan-AI/Wan2.1-T2V-14B', badge: 'Rendered via HF Inference (Wan2.1-14B)' },
+    { id: 'zai-org/CogVideoX-5b', badge: 'Rendered via HF Inference (CogVideoX-5b)' },
+    { id: 'Lightricks/LTX-Video-0.9.5', badge: 'Rendered via HF Inference (LTX-Video)' },
+  ];
+
+  let lastErr = 'HF Inference video models unavailable';
+  for (let i = 0; i < models.length; i += 1) {
+    const model = models[i];
+    onProgress(24 + i * 7, `Generating real motion video via HF Inference (${model.id})...`);
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 28000);
+    try {
+      const blob = await withTimeout(
+        client.textToVideo(
+          {
+            model: model.id,
+            provider: 'auto',
+            inputs: prompt,
+            parameters: {
+              num_frames: 41,
+              num_inference_steps: 20,
+              guidance_scale: model.id.includes('LTX') ? 3.0 : 5.0,
+            },
+          },
+          { signal: controller.signal }
+        ),
+        28000,
+        model.id
+      );
+      if (blob.size < 8000) {
+        lastErr = `${model.id} returned empty video`;
+        continue;
+      }
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: model.badge,
+      };
+    } catch (err) {
+      lastErr = err instanceof Error ? err.message : `${model.id} failed`;
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
+  throw new Error(lastErr);
+}
+
 export async function runDirectBrowserAiVideo(params: {
   prompt: string;
   mode: 'text-to-video' | 'image-to-video';
@@ -427,6 +633,7 @@ export async function runDirectBrowserAiVideo(params: {
   imageDataUrl?: string;
   geminiKey?: string;
   hfToken?: string;
+  siliconFlowKey?: string;
   pollinationsKey?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult | null> {
@@ -437,26 +644,51 @@ export async function runDirectBrowserAiVideo(params: {
     imageDataUrl,
     geminiKey,
     hfToken,
+    siliconFlowKey,
     pollinationsKey,
     onProgress,
   } = params;
   const resolvedGemini = geminiKey?.trim() || '';
   const resolvedHf = hfToken?.trim() || '';
+  const resolvedSf = siliconFlowKey?.trim() || '';
+  const resolvedPollinations = pollinationsKey?.trim() || '';
 
-  // 0. Pollinations.ai Video API (seedance -> wan -> veo)
-  try {
-    return await tryDirectBrowserPollinationsVideo({
-      prompt,
-      aspectRatio,
-      imageDataUrl: mode === 'image-to-video' ? imageDataUrl : undefined,
-      pollinationsKey,
-      onProgress,
-    });
-  } catch {
-    // Fall through to Google Veo / Hugging Face Gradio GPUs
+  const imageBlob =
+    mode === 'image-to-video' && imageDataUrl ? await resolveInputBlob(imageDataUrl) : null;
+
+  // 1. SiliconFlow Wan 2.1 (Real motion T2V / I2V)
+  if (resolvedSf) {
+    try {
+      return await tryDirectBrowserSiliconFlowVideo({
+        siliconFlowKey: resolvedSf,
+        prompt,
+        mode,
+        aspectRatio,
+        imageDataUrl,
+        onProgress,
+      });
+    } catch {
+      // Proceed to HF Inference API
+    }
   }
 
-  // 1. Google Veo 2.0
+  // 2. Hugging Face Inference Providers Router (Wan2.1 / CogVideoX-5b / LTX-Video)
+  if (resolvedHf) {
+    try {
+      return await tryDirectBrowserHuggingFaceInferenceVideo({
+        hfToken: resolvedHf,
+        prompt,
+        mode,
+        aspectRatio,
+        imageBlob,
+        onProgress,
+      });
+    } catch {
+      // Proceed to Google Veo / HF Gradio GPUs
+    }
+  }
+
+  // 3. Google Veo 2.0
   if (resolvedGemini) {
     try {
       return await tryDirectBrowserGoogleVeo({
@@ -474,8 +706,6 @@ export async function runDirectBrowserAiVideo(params: {
 
   const width = aspectRatio === '9:16' ? 384 : aspectRatio === '1:1' ? 512 : 640;
   const height = aspectRatio === '9:16' ? 640 : aspectRatio === '1:1' ? 512 : 384;
-  const imageBlob =
-    mode === 'image-to-video' && imageDataUrl ? await resolveInputBlob(imageDataUrl) : null;
   const routerDeadline = Date.now() + 26000;
 
   if (mode === 'image-to-video' && imageBlob) {
@@ -663,6 +893,20 @@ export async function runDirectBrowserAiVideo(params: {
         engineLabel: 'Rendered via CogVideoX GPU',
       };
     } catch {
+      // Try Pollinations Video if key is configured
+    }
+  }
+
+  if (resolvedPollinations) {
+    try {
+      return await tryDirectBrowserPollinationsVideo({
+        prompt,
+        aspectRatio,
+        imageDataUrl: mode === 'image-to-video' ? imageDataUrl : undefined,
+        pollinationsKey: resolvedPollinations,
+        onProgress,
+      });
+    } catch {
       return null;
     }
   }
@@ -714,7 +958,8 @@ export async function runDirectBrowserLipSync(params: {
         endpoints.find((e) => /predict|generate|test|inference|run|submit/i.test(e)) || endpoints[0];
       if (!preferred) continue;
 
-      const paramMeta = apiInfo.named_endpoints?.[preferred]?.parameters ?? [];
+      const rawParams = apiInfo.named_endpoints?.[preferred]?.parameters;
+      const paramMeta = Array.isArray(rawParams) ? rawParams : [];
       const payloadObj: Record<string, unknown> = {};
       let placedImg = false;
       let placedAudio = false;

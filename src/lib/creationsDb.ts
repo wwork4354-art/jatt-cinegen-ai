@@ -65,17 +65,25 @@ export async function loadCreations(): Promise<CreationItem[]> {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const request = tx.objectStore(STORE_NAME).getAll();
       request.onsuccess = () => {
-        const records = (request.result as StoredCreationRecord[]) || [];
-        records.sort((a, b) => b.createdAt - a.createdAt);
-        const items: CreationItem[] = records.map((rec) => {
-          const mediaUrl = rec.blob
-            ? URL.createObjectURL(rec.blob)
-            : rec.mediaDataUrl || '';
-          return {
-            ...rec,
-            mediaUrl,
-          };
-        });
+        const records = Array.isArray(request.result)
+          ? (request.result as StoredCreationRecord[])
+          : [];
+        records.sort((a, b) => (b?.createdAt ?? 0) - (a?.createdAt ?? 0));
+        const items: CreationItem[] = records
+          .filter((rec) => Boolean(rec && typeof rec.id === 'string'))
+          .map((rec) => {
+            const mediaUrl = rec.blob
+              ? URL.createObjectURL(rec.blob)
+              : rec.mediaDataUrl || '';
+            return {
+              ...rec,
+              prompt: rec.prompt || '',
+              mimeType:
+                rec.mimeType || (rec.kind === 'image' ? 'image/jpeg' : 'video/mp4'),
+              createdAt: rec.createdAt || Date.now(),
+              mediaUrl,
+            };
+          });
         db.close();
         resolve(items);
       };
@@ -106,9 +114,15 @@ export async function deleteCreation(id: string): Promise<void> {
 }
 
 export function dataUrlToBlob(dataUrl: string): Blob {
+  if (typeof dataUrl !== 'string' || !dataUrl.includes(',')) {
+    return new Blob([], { type: 'application/octet-stream' });
+  }
   const [header, base64] = dataUrl.split(',');
-  const mimeMatch = header.match(/data:([^;]+);/);
+  const mimeMatch = header?.match(/data:([^;]+);/);
   const mime = mimeMatch ? mimeMatch[1] : 'application/octet-stream';
+  if (!base64) {
+    return new Blob([], { type: mime });
+  }
   const binary = atob(base64);
   const len = binary.length;
   const bytes = new Uint8Array(len);

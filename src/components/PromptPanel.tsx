@@ -275,23 +275,31 @@ export function PromptPanel({
       }
 
       recognition.onresult = (event) => {
-        let finalChunk = '';
-        let interimChunk = '';
-        for (let i = event.resultIndex; i < event.results.length; i += 1) {
-          const result = event.results[i];
-          const text = result[0]?.transcript ?? '';
-          if (result.isFinal) {
-            finalChunk += text;
-          } else {
-            interimChunk += text;
+        try {
+          const results = event?.results;
+          if (!results || typeof results.length !== 'number') return;
+          let finalChunk = '';
+          let interimChunk = '';
+          const startIdx = Math.max(0, Number(event.resultIndex) || 0);
+          for (let i = startIdx; i < results.length; i += 1) {
+            const result = results[i];
+            if (!result) continue;
+            const text = result[0]?.transcript ?? '';
+            if (result.isFinal) {
+              finalChunk += text;
+            } else {
+              interimChunk += text;
+            }
           }
+          if (finalChunk.trim()) {
+            const current = promptRef.current.trim();
+            const appended = current ? `${current} ${finalChunk.trim()}` : finalChunk.trim();
+            onPromptChange(appended);
+          }
+          setInterimTranscript(interimChunk.trim());
+        } catch {
+          // Ignore malformed browser SpeechRecognition result payloads
         }
-        if (finalChunk.trim()) {
-          const current = promptRef.current.trim();
-          const appended = current ? `${current} ${finalChunk.trim()}` : finalChunk.trim();
-          onPromptChange(appended);
-        }
-        setInterimTranscript(interimChunk.trim());
       };
 
       recognition.onerror = (event) => {
@@ -444,8 +452,8 @@ export function PromptPanel({
       : mode === 'lip-sync'
       ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face Lip-Sync GPUs with instant Animator backup.'
       : mode === 'text-to-video'
-      ? 'Generates real moving AI MP4 videos via Pollinations.ai Video API (seedance, wan, veo) & Hugging Face GPUs.'
-      : 'Upload any reference photo and animate real character & scene motion via Pollinations image[0] & LTX-Video.';
+      ? 'Generates real character & object motion via Wan 2.1, CogVideoX-5b, and LTX-Video APIs (falls back to animated Pollinations only if APIs fail).'
+      : 'Upload any reference photo and animate real character & scene motion via Wan 2.1 I2V, Google Veo & LTX-Video.';
 
   return (
     <section
@@ -563,7 +571,7 @@ export function PromptPanel({
               onDrop={(e) => {
                 e.preventDefault();
                 setIsDragging(false);
-                const file = e.dataTransfer.files?.[0];
+                const file = e.dataTransfer?.files?.[0];
                 if (file) handleFileRead(file);
               }}
               className={`flex w-full flex-col items-center justify-center gap-2 rounded-xl border border-dashed px-4 py-7 text-center transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
@@ -848,7 +856,7 @@ export function PromptPanel({
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
           <div className="flex flex-wrap items-center gap-1.5">
             <span className="text-slate-500">Try:</span>
-            {SAMPLE_PROMPTS[mode].map((sample, idx) => (
+            {(SAMPLE_PROMPTS[mode] ?? SAMPLE_PROMPTS['text-to-video']).map((sample, idx) => (
               <button
                 key={idx}
                 type="button"
@@ -1050,7 +1058,7 @@ export function PromptPanel({
               ))}
             </div>
             <p className="text-[11px] leading-snug text-cyan-300/80">
-              Streams real moving MP4 video via Pollinations.ai Video API (seedance → wan → veo) with active Hugging Face GPU fallback.
+              Prioritizes real Text-to-Video motion models (Wan 2.1, CogVideoX-5b, LTX-Video, Google Veo) and falls back to animated Pollinations scenes only if cloud APIs fail.
             </p>
           </div>
 
@@ -1210,7 +1218,7 @@ export function PromptPanel({
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {videoSourceMode === 'hf-gpu'
-                    ? 'Auto-routes Pollinations.ai Video (seedance → wan → veo) → Google Veo → LTX-Video / Wan 2.1 MP4.'
+                    ? 'Auto-routes SiliconFlow Wan 2.1 → HF Inference (Wan 2.1 · CogVideoX-5b · LTX-Video) → Google Veo → Animated Pollinations fallback.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>
@@ -1255,10 +1263,10 @@ export function PromptPanel({
                 }`}
               >
                 <span className="text-[11px] font-semibold whitespace-nowrap">
-                  Pollinations &amp; AI Video APIs
+                  Real Text-to-Video AI APIs
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  seedance · wan · veo · LTX
+                  Wan 2.1 · CogVideoX · LTX · Veo
                 </span>
               </button>
 

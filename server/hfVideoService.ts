@@ -1,5 +1,6 @@
 import { GoogleGenAI } from '@google/genai';
 import { Client, handle_file } from '@gradio/client';
+import { InferenceClient } from '@huggingface/inference';
 import crypto from 'node:crypto';
 
 export type HfVideoMode = 'text-to-video' | 'image-to-video';
@@ -613,65 +614,95 @@ async function tryPollinationsVideo(params: {
   throw new Error(lastError);
 }
 
-// Engine 1C: Active Hugging Face Inference API (router.huggingface.co) - Lightricks/LTX-Video & Wan-AI/Wan2.1-T2V-1.3B
+// Engine: Active Hugging Face Inference API via @huggingface/inference (router.huggingface.co providers)
 async function tryHuggingFaceInferenceVideo(params: {
   hfToken: string;
   modelId: string;
+  provider?: 'auto' | 'fal-ai' | 'wavespeed' | 'hf-inference';
   label: string;
   prompt: string;
+  mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
+  imageBlob?: Blob | null;
   timeoutMs: number;
   onProgress: (percent: number, message: string) => void;
   isAborted?: () => boolean;
 }): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number }> {
-  const { hfToken, modelId, label, prompt, aspectRatio, timeoutMs, onProgress, isAborted } = params;
-  onProgress(32, `Generating 5s MP4 via HF Inference API (${label})...`);
+  const {
+    hfToken,
+    modelId,
+    provider = 'auto',
+    label,
+    prompt,
+    mode,
+    aspectRatio,
+    imageBlob,
+    timeoutMs,
+    onProgress,
+    isAborted,
+  } = params;
+  onProgress(
+    28,
+    mode === 'image-to-video'
+      ? `Animating reference photo via HF Inference API (${label})...`
+      : `Generating real motion video via HF Inference API (${label})...`
+  );
 
   const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 512 : 768;
   const height = aspectRatio === '9:16' ? 768 : aspectRatio === '1:1' ? 512 : 448;
 
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), Math.min(25000, timeoutMs));
+  const effectiveTimeout = Math.min(34000, Math.max(8000, timeoutMs));
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
   try {
     if (isAborted?.()) throw new Error('Aborted');
-    const res = await fetch(`https://router.huggingface.co/hf-inference/models/${modelId}`, {
-      method: 'POST',
-      signal: controller.signal,
-      headers: {
-        Authorization: `Bearer ${hfToken}`,
-        'Content-Type': 'application/json',
-        Accept: 'video/mp4, application/octet-stream, application/json',
-      },
-      body: JSON.stringify({
-        inputs: prompt,
-        parameters: {
-          num_frames: 41,
-          num_inference_steps: 20,
-          guidance_scale: modelId.includes('LTX') ? 3.0 : 5.0,
-        },
-      }),
-    });
+    const client = new InferenceClient(hfToken);
 
-    if (!res.ok) {
-      throw new Error(`${label} HTTP ${res.status}`);
+    let videoBlob: Blob;
+    if (mode === 'image-to-video' && imageBlob) {
+      videoBlob = await withTimeout(
+        client.imageToVideo(
+          {
+            model: modelId,
+            provider,
+            inputs: imageBlob,
+            parameters: {
+              prompt,
+              num_inference_steps: 20,
+              guidance_scale: 5.0,
+            },
+          },
+          { signal: controller.signal }
+        ),
+        effectiveTimeout,
+        label
+      );
+    } else {
+      videoBlob = await withTimeout(
+        client.textToVideo(
+          {
+            model: modelId,
+            provider,
+            inputs: prompt,
+            parameters: {
+              num_frames: 41,
+              num_inference_steps: 20,
+              guidance_scale: modelId.includes('LTX') ? 3.0 : 5.0,
+            },
+          },
+          { signal: controller.signal }
+        ),
+        effectiveTimeout,
+        label
+      );
     }
 
-    const contentType = (res.headers.get('content-type') || '').toLowerCase();
-    if (contentType.includes('application/json')) {
-      const json = (await res.json()) as { video?: string; url?: string; error?: string };
-      const remoteUrl = json.video || json.url;
-      if (remoteUrl && remoteUrl.startsWith('http')) {
-        const downloaded = await downloadVideoBuffer(remoteUrl, undefined, label);
-        return { ...downloaded, width, height };
-      }
-      throw new Error(json.error || `${label} returned JSON without video`);
-    }
-
-    const buffer = Buffer.from(await res.arrayBuffer());
+    const buffer = Buffer.from(await videoBlob.arrayBuffer());
     if (buffer.byteLength < 8000) {
       throw new Error(`${label} returned an empty video payload`);
     }
 
+    const contentType = (videoBlob.type || '').toLowerCase();
     return {
       buffer,
       mimeType: contentType.startsWith('video/') ? contentType.split(';')[0] : 'video/mp4',
@@ -750,7 +781,7 @@ export async function generateSmartMultiEngineVideo(params: {
     ''
   ).trim();
 
-  const cloudRouterDeadline = Date.now() + 58000;
+  const cloudRouterDeadline = Date.now() + 64000;
   const remainingBudget = () => Math.max(4000, cloudRouterDeadline - Date.now());
 
   const progressCb = (percent: number, message: string) => {
@@ -764,30 +795,115 @@ export async function generateSmartMultiEngineVideo(params: {
     run: () => Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride?: string }>;
   }> = [];
 
-  // PRIORITY 1: Pollinations.ai Video API (seedance -> wan -> veo, with image[0] and optional ?key=)
-  attempts.push({
-    badge: 'Rendered via Pollinations.ai Video',
-    run: async () => {
-      const res = await tryPollinationsVideo({
-        prompt,
-        aspectRatio,
-        referenceImageUrl: resolvedRefImageUrl,
-        pollinationsKey: resolvedPollinationsKey || undefined,
-        timeoutMs: Math.min(34000, remainingBudget()),
-        onProgress: progressCb,
-        isAborted,
-      });
-      return {
-        buffer: res.buffer,
-        mimeType: res.mimeType,
-        width: res.width,
-        height: res.height,
-        badgeOverride: `Rendered via Pollinations.ai (${res.modelUsed})`,
-      };
-    },
-  });
+  // PRIORITY 1: SiliconFlow Video API (Qwen Wan-AI/Wan2.1-T2V-14B / I2V-14B-720P) — real character & scene motion
+  if (resolvedSiliconFlowKey) {
+    attempts.push({
+      badge: 'Rendered via Qwen Wan 2.1 (SiliconFlow)',
+      run: () =>
+        trySiliconFlowWanVideo({
+          apiKey: resolvedSiliconFlowKey,
+          prompt,
+          mode,
+          aspectRatio,
+          imageDataUrl,
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+  }
 
-  // PRIORITY 2: Google Veo API (veo-2.0-generate-001) when configured
+  // PRIORITY 2: Hugging Face Inference Providers Router (Wan2.1, CogVideoX-5b, LTX-Video) — real character & object motion
+  if (resolvedHfToken) {
+    if (mode === 'image-to-video' && imageBlob) {
+      attempts.push({
+        badge: 'Rendered via HF Inference (Wan2.1-I2V)',
+        run: () =>
+          tryHuggingFaceInferenceVideo({
+            hfToken: resolvedHfToken,
+            modelId: 'Wan-AI/Wan2.1-I2V-14B-720P',
+            provider: 'auto',
+            label: 'Wan2.1-I2V-14B',
+            prompt,
+            mode,
+            aspectRatio,
+            imageBlob,
+            timeoutMs: remainingBudget(),
+            onProgress: progressCb,
+            isAborted,
+          }),
+      });
+    } else {
+      attempts.push({
+        badge: 'Rendered via HF Inference (Wan2.1-1.3B)',
+        run: () =>
+          tryHuggingFaceInferenceVideo({
+            hfToken: resolvedHfToken,
+            modelId: 'Wan-AI/Wan2.1-T2V-1.3B',
+            provider: 'auto',
+            label: 'Wan-AI/Wan2.1-T2V-1.3B',
+            prompt,
+            mode,
+            aspectRatio,
+            timeoutMs: remainingBudget(),
+            onProgress: progressCb,
+            isAborted,
+          }),
+      });
+
+      attempts.push({
+        badge: 'Rendered via HF Inference (Wan2.1-14B)',
+        run: () =>
+          tryHuggingFaceInferenceVideo({
+            hfToken: resolvedHfToken,
+            modelId: 'Wan-AI/Wan2.1-T2V-14B',
+            provider: 'auto',
+            label: 'Wan-AI/Wan2.1-T2V-14B',
+            prompt,
+            mode,
+            aspectRatio,
+            timeoutMs: remainingBudget(),
+            onProgress: progressCb,
+            isAborted,
+          }),
+      });
+
+      attempts.push({
+        badge: 'Rendered via HF Inference (CogVideoX-5b)',
+        run: () =>
+          tryHuggingFaceInferenceVideo({
+            hfToken: resolvedHfToken,
+            modelId: 'zai-org/CogVideoX-5b',
+            provider: 'auto',
+            label: 'zai-org/CogVideoX-5b',
+            prompt,
+            mode,
+            aspectRatio,
+            timeoutMs: remainingBudget(),
+            onProgress: progressCb,
+            isAborted,
+          }),
+      });
+
+      attempts.push({
+        badge: 'Rendered via HF Inference (LTX-Video)',
+        run: () =>
+          tryHuggingFaceInferenceVideo({
+            hfToken: resolvedHfToken,
+            modelId: 'Lightricks/LTX-Video-0.9.5',
+            provider: 'auto',
+            label: 'Lightricks/LTX-Video-0.9.5',
+            prompt,
+            mode,
+            aspectRatio,
+            timeoutMs: remainingBudget(),
+            onProgress: progressCb,
+            isAborted,
+          }),
+      });
+    }
+  }
+
+  // PRIORITY 3: Google Veo 2.0 (veo-2.0-generate-001) when configured
   if (resolvedGeminiKey) {
     attempts.push({
       badge: 'Rendered via Google Veo',
@@ -804,57 +920,7 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 3: Active Hugging Face Inference API (Lightricks/LTX-Video & Wan-AI/Wan2.1-T2V-1.3B)
-  if (resolvedHfToken && mode === 'text-to-video') {
-    attempts.push({
-      badge: 'Rendered via HF Inference (LTX-Video)',
-      run: () =>
-        tryHuggingFaceInferenceVideo({
-          hfToken: resolvedHfToken,
-          modelId: 'Lightricks/LTX-Video',
-          label: 'Lightricks/LTX-Video',
-          prompt,
-          aspectRatio,
-          timeoutMs: remainingBudget(),
-          onProgress: progressCb,
-          isAborted,
-        }),
-    });
-
-    attempts.push({
-      badge: 'Rendered via HF Inference (Wan2.1-1.3B)',
-      run: () =>
-        tryHuggingFaceInferenceVideo({
-          hfToken: resolvedHfToken,
-          modelId: 'Wan-AI/Wan2.1-T2V-1.3B',
-          label: 'Wan-AI/Wan2.1-T2V-1.3B',
-          prompt,
-          aspectRatio,
-          timeoutMs: remainingBudget(),
-          onProgress: progressCb,
-          isAborted,
-        }),
-    });
-  }
-
-  // PRIORITY 4: SiliconFlow Free Credit API (Qwen Wan-AI/Wan2.1-T2V-14B / I2V)
-  if (resolvedSiliconFlowKey) {
-    attempts.push({
-      badge: 'Rendered via Qwen Wan 2.1',
-      run: () =>
-        trySiliconFlowWanVideo({
-          apiKey: resolvedSiliconFlowKey,
-          prompt,
-          mode,
-          aspectRatio,
-          imageDataUrl,
-          onProgress: progressCb,
-          isAborted,
-        }),
-    });
-  }
-
-  // PRIORITY 5: Live Hugging Face Gradio GPUs (Real MP4 video fallback — NO static slideshows)
+  // PRIORITY 4: Live Hugging Face Gradio GPUs (Real Text-to-Video & Image-to-Video MP4)
   if (mode === 'image-to-video' && imageBlob) {
     attempts.push({
       badge: 'Rendered via LTX-Video GPU',
@@ -1008,8 +1074,32 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  let lastReason = 'Real video endpoints are currently busy';
-  let pollinationsFailure = '';
+  // PRIORITY 5: Pollinations.ai Video API only if key is configured and real HF/SiliconFlow/Veo APIs failed
+  if (resolvedPollinationsKey) {
+    attempts.push({
+      badge: 'Rendered via Pollinations.ai Video',
+      run: async () => {
+        const res = await tryPollinationsVideo({
+          prompt,
+          aspectRatio,
+          referenceImageUrl: resolvedRefImageUrl,
+          pollinationsKey: resolvedPollinationsKey,
+          timeoutMs: Math.min(20000, remainingBudget()),
+          onProgress: progressCb,
+          isAborted,
+        });
+        return {
+          buffer: res.buffer,
+          mimeType: res.mimeType,
+          width: res.width,
+          height: res.height,
+          badgeOverride: `Rendered via Pollinations.ai (${res.modelUsed})`,
+        };
+      },
+    });
+  }
+
+  let lastReason = 'Real Text-to-Video APIs are currently unavailable or busy';
 
   for (let i = 0; i < attempts.length; i += 1) {
     if (isAborted?.()) return;
@@ -1036,27 +1126,20 @@ export async function generateSmartMultiEngineVideo(params: {
       return;
     } catch (err) {
       lastReason = err instanceof Error ? err.message : 'Video endpoint unavailable';
-      if (i === 0) {
-        pollinationsFailure = lastReason;
-      }
       if (i + 1 < attempts.length && Date.now() <= cloudRouterDeadline - 3000 && !isAborted?.()) {
         onEvent({
           type: 'progress',
-          percent: Math.min(48, 22 + i * 6),
-          message: `${lastReason} — trying next real MP4 video endpoint...`,
+          percent: Math.min(54, 20 + i * 7),
+          message: `${lastReason} — trying next real Text-to-Video model...`,
         });
       }
     }
   }
 
   if (!isAborted?.()) {
-    const detailedSummary =
-      pollinationsFailure && pollinationsFailure !== lastReason
-        ? `${pollinationsFailure} Backup GPUs also busy (${lastReason}).`
-        : `${lastReason}. Add a paid Pollinations Key, Google Gemini/Veo Key, or Hugging Face Token in API Keys and retry.`;
     onEvent({
       type: 'busy',
-      message: detailedSummary,
+      message: `${lastReason} — switching to animated Pollinations AI fallback...`,
     });
   }
 }

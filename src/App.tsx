@@ -13,6 +13,7 @@ import {
   runDirectBrowserLipSync,
 } from './lib/clientGpuVideo';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
+import { renderAnimatedPollinationsFallback } from './lib/animatedPollinationsFallback';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
 import { getVoiceLanguageById, translatePromptToEnglish } from './lib/voiceLanguages';
@@ -165,13 +166,18 @@ export default function App() {
   // Load persisted creations on mount
   useEffect(() => {
     let mounted = true;
-    loadCreations().then((items) => {
-      if (!mounted) return;
-      setCreations(items);
-      if (items.length > 0) {
-        setActiveCreationId(items[0].id);
-      }
-    });
+    loadCreations()
+      .then((items) => {
+        if (!mounted) return;
+        const safeItems = Array.isArray(items)
+          ? items.filter((item) => Boolean(item && item.id))
+          : [];
+        setCreations(safeItems);
+        if (safeItems.length > 0 && safeItems[0]?.id) {
+          setActiveCreationId(safeItems[0].id);
+        }
+      })
+      .catch(() => {});
     return () => {
       mounted = false;
     };
@@ -599,8 +605,8 @@ export default function App() {
 
     startTimer(
       targetMode === 'image-to-video'
-        ? 'Animating reference photo via Pollinations.ai Video API...'
-        : 'Generating real MP4 video via Pollinations.ai (seedance)...'
+        ? 'Routing photo to real Image-to-Video AI (Wan 2.1 / LTX-Video)...'
+        : 'Routing to real Text-to-Video AI (Wan 2.1 / CogVideoX / LTX-Video)...'
     );
 
     let generatedRealMp4 = false;
@@ -621,7 +627,7 @@ export default function App() {
       }
 
       const hfStreamAbort = new AbortController();
-      const hfStreamTimer = window.setTimeout(() => hfStreamAbort.abort(), 62000);
+      const hfStreamTimer = window.setTimeout(() => hfStreamAbort.abort(), 70000);
       try {
         const response = await fetch('/api/generate/hf-video', {
           method: 'POST',
@@ -746,7 +752,7 @@ export default function App() {
         window.clearTimeout(hfStreamTimer);
       }
 
-      // Direct Browser Pollinations / Veo / Gradio fallback (handles Vercel static deployments where /api/* returns 404)
+      // Direct Browser SiliconFlow / HF Inference / Veo / Gradio fallback (handles Vercel static deployments where /api/* returns 404)
       if (!generatedRealMp4 && shouldTryDirectBrowser) {
         const directResult = await runDirectBrowserAiVideo({
           prompt: effectivePrompt,
@@ -755,6 +761,7 @@ export default function App() {
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
           geminiKey: activeGeminiKey,
           hfToken: activeHfToken,
+          siliconFlowKey: activeSiliconKey,
           pollinationsKey: activePollinationsKey,
           onProgress: (percent, statusMessage) => {
             setProgress((prev) =>
@@ -788,18 +795,91 @@ export default function App() {
         }
       }
 
+      // Fallback ONLY when every real Text-to-Video / Image-to-Video API fails or times out
       if (!generatedRealMp4) {
-        setErrorMessage(
-          busyReason ||
-            'Could not generate a real MP4 video right now. Add an optional Pollinations Key (VITE_POLLINATIONS_KEY) or Hugging Face Token in API Keys and retry.'
+        const activeVoice = getVoiceLanguageById(voiceLanguageId);
+        setProgress((prev) =>
+          prev.active
+            ? {
+                ...prev,
+                percent: 45,
+                statusMessage:
+                  busyReason ||
+                  'Real video APIs unavailable — rendering animated Pollinations AI fallback...',
+              }
+            : prev
         );
+
+        const fallbackResult = await renderAnimatedPollinationsFallback({
+          mode: targetMode,
+          prompt: effectivePrompt,
+          aspectRatio,
+          style: stylePreset,
+          duration,
+          cameraMotion,
+          quality,
+          imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
+          voiceoverEnabled,
+          voiceTranslateCode: activeVoice.translateHintCode,
+          backgroundMusicFile,
+          onFrameCanvas: (sourceCanvas) => {
+            setIsLivePreviewActive((prev) => (prev ? prev : true));
+            const target = liveCanvasRef.current;
+            if (!target) return;
+            const maxPreviewSide = 1280;
+            const scale = Math.min(
+              1,
+              maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+            );
+            const previewW = Math.round(sourceCanvas.width * scale);
+            const previewH = Math.round(sourceCanvas.height * scale);
+            if (target.width !== previewW || target.height !== previewH) {
+              target.width = previewW;
+              target.height = previewH;
+            }
+            const tctx = target.getContext('2d');
+            if (tctx) {
+              tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
+            }
+          },
+          onProgress: (percent, statusMessage, remainingSeconds) => {
+            setProgress((prev) =>
+              prev.active
+                ? { ...prev, percent, statusMessage, remainingSeconds }
+                : prev
+            );
+          },
+        });
+
+        const fallbackItem: CreationItem = {
+          id: crypto.randomUUID(),
+          kind: 'video',
+          sourceMode: targetMode,
+          prompt: trimmedPrompt,
+          style: stylePreset,
+          aspectRatio,
+          width: fallbackResult.width,
+          height: fallbackResult.height,
+          duration,
+          cameraMotion,
+          quality,
+          engineLabel: 'Fallback: Animated Pollinations AI',
+          scenes: fallbackResult.scenes,
+          mediaUrl: fallbackResult.mediaUrl,
+          mimeType: fallbackResult.mimeType,
+          createdAt: Date.now(),
+          blob: fallbackResult.blob,
+        };
+
+        await persistNewCreation(fallbackItem);
       }
     } catch (err) {
       setErrorMessage(
-        err instanceof Error ? err.message : 'Real MP4 video generation failed.'
+        err instanceof Error ? err.message : 'Video generation failed.'
       );
     } finally {
       stopTimer();
+      setIsLivePreviewActive(false);
       setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
     }
   };
@@ -986,12 +1066,13 @@ export default function App() {
   };
 
   const handleDownload = useCallback(async (item: CreationItem) => {
+    const safeMime = item.mimeType || '';
     const ext =
       item.kind === 'image'
-        ? item.mimeType.includes('png')
+        ? safeMime.includes('png')
           ? 'png'
           : 'jpg'
-        : item.mimeType.includes('mp4')
+        : safeMime.includes('mp4')
         ? 'mp4'
         : 'webm';
     const filename = `jatt-cinegen-ai-${item.kind}-${item.width}x${item.height}.${ext}`;
@@ -1041,13 +1122,20 @@ export default function App() {
 
   const handleInspectCreation = useCallback((item: CreationItem) => {
     setActiveCreationId(item.id);
-    setPrompt(item.prompt);
-    setAspectRatio(item.aspectRatio);
-    setStylePreset(item.style);
+    setPrompt(item.prompt ?? '');
+    setAspectRatio(item.aspectRatio ?? '16:9');
+    setStylePreset(item.style ?? 'cinematic');
     if (item.duration) setDuration(item.duration);
     if (item.cameraMotion) setCameraMotion(item.cameraMotion);
     if (item.quality) setQuality(item.quality);
-    setActiveTab(item.sourceMode);
+    const validTab: StudioTab =
+      item.sourceMode === 'text-to-image' ||
+      item.sourceMode === 'image-to-video' ||
+      item.sourceMode === 'lip-sync' ||
+      item.sourceMode === 'text-to-video'
+        ? item.sourceMode
+        : 'text-to-video';
+    setActiveTab(validTab);
   }, []);
 
   const handleAnimateImage = useCallback(
@@ -1182,6 +1270,7 @@ export default function App() {
                   }}
                   hasGpuKeys={Boolean(
                     (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
+                      (engineVaultKeys.siliconFlowKey || envSf).trim() ||
                       (engineVaultKeys.geminiKey || envGemini).trim()
                   )}
                   onOpenEngineVault={() => setIsEngineVaultOpen(true)}

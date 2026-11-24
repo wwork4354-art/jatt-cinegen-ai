@@ -339,7 +339,7 @@ export function PreviewStage({
             >
               <Download className="h-3.5 w-3.5" />
               {activeCreation.kind === 'video'
-                ? activeCreation.mimeType.includes('mp4')
+                ? (activeCreation.mimeType || '').includes('mp4')
                   ? 'Download MP4'
                   : strings.downloadVideoBtn
                 : strings.downloadImageBtn}

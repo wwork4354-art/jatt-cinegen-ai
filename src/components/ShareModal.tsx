@@ -47,7 +47,7 @@ export function ShareModal({ item, onClose, onDownload }: ShareModalProps) {
 
       if (blobToShare && navigator.canShare) {
         const ext =
-          item.kind === 'image' ? 'jpg' : item.mimeType.includes('mp4') ? 'mp4' : 'webm';
+          item.kind === 'image' ? 'jpg' : (item.mimeType || '').includes('mp4') ? 'mp4' : 'webm';
         const file = new File([blobToShare], `jatt-cinegen-ai-${item.id}.${ext}`, {
           type:
             blobToShare.type ||

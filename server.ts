@@ -167,7 +167,7 @@ async function startServer() {
       const gtxRes = await fetch(gtxUrl);
       if (gtxRes.ok) {
         const gtxData = (await gtxRes.json()) as unknown[];
-        if (Array.isArray(gtxData[0])) {
+        if (Array.isArray(gtxData) && Array.isArray(gtxData[0])) {
           const translated = gtxData[0]
             .map((segment) => (Array.isArray(segment) && typeof segment[0] === 'string' ? segment[0] : ''))
             .join('')
@@ -320,7 +320,10 @@ async function startServer() {
     sendEvent({
       type: 'progress',
       percent: 10,
-      message: 'Generating real MP4 via Pollinations.ai Video API...',
+      message:
+        safeMode === 'image-to-video'
+          ? 'Routing photo to real Image-to-Video AI model...'
+          : 'Routing to real Text-to-Video AI model (Wan 2.1 / CogVideoX / LTX-Video)...',
     });
 
     let routeTimer: NodeJS.Timeout | undefined;
@@ -328,8 +331,8 @@ async function startServer() {
       const routeTimeout = new Promise<never>((_, reject) => {
         routeTimer = setTimeout(() => {
           aborted = true;
-          reject(new Error('60-second video generation timeout reached'));
-        }, 60000);
+          reject(new Error('68-second video generation timeout reached'));
+        }, 68000);
       });
 
       await Promise.race([

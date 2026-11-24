@@ -76,9 +76,10 @@ export function EngineVaultModal({
         <div className="rounded-xl border border-cyan-400/20 bg-cyan-400/[0.05] px-3.5 py-2.5 text-[11px] text-cyan-100/90 flex items-center gap-2">
           <ShieldCheck className="h-4 w-4 shrink-0 text-cyan-400" />
           <span>
-            Real MP4 Video Router: <strong className="text-white">Pollinations.ai (seedance · wan · veo)</strong> →{' '}
-            <strong className="text-white">Google Veo 2.0</strong> →{' '}
-            <strong className="text-cyan-300">LTX-Video · Wan 2.1 · SVD</strong>
+            Real Video Router: <strong className="text-white">SiliconFlow (Wan 2.1)</strong> →{' '}
+            <strong className="text-white">HF Inference (Wan 2.1 · CogVideoX-5b · LTX-Video)</strong> →{' '}
+            <strong className="text-cyan-300">Google Veo 2.0</strong> →{' '}
+            <span className="text-slate-300">Animated Pollinations Fallback</span>
           </span>
         </div>
 
