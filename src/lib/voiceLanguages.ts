@@ -158,7 +158,8 @@ export function getVoiceLanguageById(id: string): VoiceLanguageOption {
 
 export async function translatePromptToEnglish(
   rawPrompt: string,
-  sourceLanguageId?: string
+  sourceLanguageId?: string,
+  keys?: { geminiKey?: string; groqKey?: string; openRouterKey?: string }
 ): Promise<{ englishPrompt: string; wasTranslated: boolean }> {
   const trimmed = rawPrompt.trim();
   if (!trimmed) return { englishPrompt: '', wasTranslated: false };
@@ -179,6 +180,9 @@ export async function translatePromptToEnglish(
         prompt: trimmed,
         sourceLanguage: langMeta?.englishName,
         translateHintCode: langMeta?.translateHintCode ?? 'auto',
+        geminiKey: keys?.geminiKey?.trim() || undefined,
+        groqKey: keys?.groqKey?.trim() || undefined,
+        openRouterKey: keys?.openRouterKey?.trim() || undefined,
       }),
     });
     const contentType = res.headers.get('content-type') || '';
@@ -195,7 +199,82 @@ export async function translatePromptToEnglish(
       }
     }
   } catch {
-    // Fall back safely to original prompt if translation endpoint is offline
+    // Fall back to direct Groq / OpenRouter translation if backend route is unavailable
+  }
+
+  const groqKey = keys?.groqKey?.trim();
+  if (groqKey) {
+    try {
+      const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${groqKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: 'llama-3.3-70b-versatile',
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Translate the user visual prompt into natural, descriptive English. Return ONLY the English text without quotes.',
+            },
+            { role: 'user', content: trimmed },
+          ],
+          max_tokens: 220,
+          temperature: 0.2,
+        }),
+      });
+      if (groqRes.ok) {
+        const data = (await groqRes.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const translated = (data.choices?.[0]?.message?.content ?? '').trim().replace(/^["']|["']$/g, '');
+        if (translated) {
+          return { englishPrompt: translated, wasTranslated: translated !== trimmed };
+        }
+      }
+    } catch {
+      // Try OpenRouter next
+    }
+  }
+
+  const openRouterKey = keys?.openRouterKey?.trim();
+  if (openRouterKey) {
+    try {
+      const orRes = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${openRouterKey}`,
+          'Content-Type': 'application/json',
+          'X-Title': 'Jatt CineGen AI',
+        },
+        body: JSON.stringify({
+          model: 'meta-llama/llama-3.3-70b-instruct:free',
+          messages: [
+            {
+              role: 'system',
+              content:
+                'Translate the user visual prompt into natural, descriptive English. Return ONLY the English text without quotes.',
+            },
+            { role: 'user', content: trimmed },
+          ],
+          max_tokens: 220,
+          temperature: 0.2,
+        }),
+      });
+      if (orRes.ok) {
+        const data = (await orRes.json()) as {
+          choices?: Array<{ message?: { content?: string } }>;
+        };
+        const translated = (data.choices?.[0]?.message?.content ?? '').trim().replace(/^["']|["']$/g, '');
+        if (translated) {
+          return { englishPrompt: translated, wasTranslated: translated !== trimmed };
+        }
+      }
+    } catch {
+      // Fall back safely to original prompt
+    }
   }
 
   return { englishPrompt: trimmed, wasTranslated: false };

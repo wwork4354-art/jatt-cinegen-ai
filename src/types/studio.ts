@@ -36,6 +36,11 @@ export interface EngineVaultKeys {
   siliconFlowKey: string;
   pollinationsKey?: string;
   agnesKey?: string;
+  falKey?: string;
+  replicateToken?: string;
+  togetherKey?: string;
+  groqKey?: string;
+  openRouterKey?: string;
 }
 
 export interface StylePresetOption {

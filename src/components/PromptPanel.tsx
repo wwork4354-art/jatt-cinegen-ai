@@ -75,6 +75,16 @@ interface PromptPanelProps {
   onHfTokenChange: (token: string) => void;
   agnesApiKey: string;
   onAgnesApiKeyChange: (key: string) => void;
+  falKey: string;
+  onFalKeyChange: (key: string) => void;
+  replicateToken: string;
+  onReplicateTokenChange: (token: string) => void;
+  togetherKey: string;
+  onTogetherKeyChange: (key: string) => void;
+  groqKey: string;
+  onGroqKeyChange: (key: string) => void;
+  openRouterKey: string;
+  onOpenRouterKeyChange: (key: string) => void;
   hasGpuKeys: boolean;
   onOpenEngineVault: () => void;
   customBackendUrl: string;
@@ -175,6 +185,16 @@ export function PromptPanel({
   onHfTokenChange,
   agnesApiKey,
   onAgnesApiKeyChange,
+  falKey,
+  onFalKeyChange,
+  replicateToken,
+  onReplicateTokenChange,
+  togetherKey,
+  onTogetherKeyChange,
+  groqKey,
+  onGroqKeyChange,
+  openRouterKey,
+  onOpenRouterKeyChange,
   hasGpuKeys,
   onOpenEngineVault,
   customBackendUrl,
@@ -193,6 +213,9 @@ export function PromptPanel({
   const audioInputRef = useRef<HTMLInputElement>(null);
   const lipSyncAudioInputRef = useRef<HTMLInputElement>(null);
   const recognitionRef = useRef<SpeechRecognitionInstanceLike | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
   const promptRef = useRef(prompt);
   promptRef.current = prompt;
 
@@ -211,12 +234,18 @@ export function PromptPanel({
 
   const [isDragging, setIsDragging] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [voiceStatusNote, setVoiceStatusNote] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isEngineSettingsOpen, setIsEngineSettingsOpen] = useState(false);
   const [showHfToken, setShowHfToken] = useState(false);
   const [showAgnesKey, setShowAgnesKey] = useState(false);
+  const [showFalKey, setShowFalKey] = useState(false);
+  const [showReplicateToken, setShowReplicateToken] = useState(false);
+  const [showTogetherKey, setShowTogetherKey] = useState(false);
+  const [showGroqKey, setShowGroqKey] = useState(false);
+  const [showOpenRouterKey, setShowOpenRouterKey] = useState(false);
   const [backendStatus, setBackendStatus] = useState<{
     checking: boolean;
     ok?: boolean;
@@ -241,6 +270,16 @@ export function PromptPanel({
         } catch {
           // Ignore cleanup errors
         }
+      }
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        try {
+          mediaRecorderRef.current.stop();
+        } catch {
+          // Ignore cleanup errors
+        }
+      }
+      if (mediaStreamRef.current) {
+        mediaStreamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
   }, []);
@@ -347,9 +386,150 @@ export function PromptPanel({
     }
   };
 
-  const toggleVoiceInput = () => {
+  const transcribeAudioWithGroqWhisper = async (audioBlob: Blob) => {
+    setIsTranscribingVoice(true);
+    setVoiceStatusNote(`Transcribing ${activeVoiceLang.englishName} via Groq whisper-large-v3-turbo...`);
+    try {
+      const whisperLang = activeVoiceLang.translateHintCode.split('-')[0] || 'en';
+      const base64Audio = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = String(reader.result || '');
+          const commaIdx = result.indexOf(',');
+          resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+        };
+        reader.onerror = () => reject(new Error('Failed to read recorded audio.'));
+        reader.readAsDataURL(audioBlob);
+      });
+
+      let transcriptText = '';
+      try {
+        const apiRes = await fetch('/api/transcribe-audio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            audioBase64: base64Audio,
+            mimeType: audioBlob.type || 'audio/webm',
+            languageCode: whisperLang,
+            groqKey: groqKey.trim() || undefined,
+          }),
+        });
+        const contentType = apiRes.headers.get('content-type') || '';
+        if (apiRes.ok && contentType.includes('application/json')) {
+          const payload = (await apiRes.json()) as { text?: string };
+          transcriptText = (payload.text ?? '').trim();
+        } else if (apiRes.status !== 404) {
+          const errPayload = contentType.includes('application/json')
+            ? ((await apiRes.json().catch(() => ({}))) as { error?: string })
+            : {};
+          if (!groqKey.trim()) {
+            throw new Error(errPayload.error || 'Voice transcription failed.');
+          }
+        }
+      } catch (err) {
+        if (!groqKey.trim()) throw err;
+      }
+
+      if (!transcriptText && groqKey.trim()) {
+        const ext = (audioBlob.type || '').includes('mp4')
+          ? 'm4a'
+          : (audioBlob.type || '').includes('ogg')
+          ? 'ogg'
+          : 'webm';
+        const form = new FormData();
+        form.append('file', audioBlob, `voice-input.${ext}`);
+        form.append('model', 'whisper-large-v3-turbo');
+        if (whisperLang) form.append('language', whisperLang);
+
+        const directRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${groqKey.trim()}` },
+          body: form,
+        });
+        if (!directRes.ok) {
+          throw new Error(`Groq Whisper failed (${directRes.status})`);
+        }
+        const directData = (await directRes.json()) as { text?: string };
+        transcriptText = (directData.text ?? '').trim();
+      }
+
+      if (transcriptText) {
+        const current = promptRef.current.trim();
+        onPromptChange(current ? `${current} ${transcriptText}` : transcriptText);
+        setVoiceStatusNote(`Transcribed with Groq whisper-large-v3-turbo (${activeVoiceLang.nativeLabel}).`);
+      } else {
+        setVoiceError('No clear speech detected in recording. Please speak closer to the mic.');
+      }
+    } catch (err) {
+      setVoiceError(err instanceof Error ? err.message : 'Groq Whisper voice transcription failed.');
+    } finally {
+      setIsTranscribingVoice(false);
+    }
+  };
+
+  const startGroqWhisperRecording = async (): Promise<boolean> => {
+    if (
+      typeof navigator === 'undefined' ||
+      !navigator.mediaDevices?.getUserMedia ||
+      typeof MediaRecorder === 'undefined'
+    ) {
+      return false;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+      audioChunksRef.current = [];
+      const recorder = new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+
+      recorder.ondataavailable = (ev) => {
+        if (ev.data && ev.data.size > 0) {
+          audioChunksRef.current.push(ev.data);
+        }
+      };
+
+      recorder.onstop = () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        if (mediaStreamRef.current) {
+          mediaStreamRef.current.getTracks().forEach((t) => t.stop());
+          mediaStreamRef.current = null;
+        }
+        mediaRecorderRef.current = null;
+        setIsListening(false);
+        setInterimTranscript('');
+        if (chunks.length > 0) {
+          const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
+          void transcribeAudioWithGroqWhisper(blob);
+        }
+      };
+
+      recorder.start();
+      setIsListening(true);
+      setVoiceStatusNote(
+        `Recording ${activeVoiceLang.englishName} for Groq Whisper — click button again to transcribe`
+      );
+      return true;
+    } catch {
+      setVoiceError('Microphone access denied. Please allow microphone permission.');
+      return true;
+    }
+  };
+
+  const toggleVoiceInput = async () => {
+    if (isTranscribingVoice) return;
     setVoiceError(null);
     setVoiceStatusNote(null);
+
+    if (isListening && mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      return;
+    }
+
     if (isListening && recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -359,6 +539,11 @@ export function PromptPanel({
       setIsListening(false);
       setInterimTranscript('');
       return;
+    }
+
+    if (groqKey.trim()) {
+      const started = await startGroqWhisperRecording();
+      if (started) return;
     }
 
     const SpeechRecCtor =
@@ -375,7 +560,9 @@ export function PromptPanel({
       ).webkitSpeechRecognition;
 
     if (!SpeechRecCtor) {
-      setVoiceError('Voice input requires Chrome, Edge, or Safari SpeechRecognition support.');
+      setVoiceError(
+        'Voice input needs Chrome/Edge/Safari SpeechRecognition or a Groq Free API Key (whisper-large-v3-turbo).'
+      );
       return;
     }
 
@@ -453,12 +640,12 @@ export function PromptPanel({
 
   const subtitle =
     mode === 'text-to-image'
-      ? 'Generate Full HD images 100% free via Pollinations AI with zero key limits.'
+      ? 'Generate Full HD images via Together AI (FLUX.1-schnell-Free) or 100% free Pollinations AI.'
       : mode === 'lip-sync'
-      ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face Lip-Sync GPUs with instant Animator backup.'
+      ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face & Replicate SadTalker GPUs with instant Animator backup.'
       : mode === 'text-to-video'
-      ? 'Generates real character & object motion via Wan 2.1, CogVideoX-5b, and LTX-Video APIs (falls back to animated Pollinations only if APIs fail).'
-      : 'Upload any reference photo and animate real character & scene motion via Wan 2.1 I2V, Google Veo & LTX-Video.';
+      ? 'Generates real character & object motion via Wan 2.1, Fal.ai, Replicate, Agnes AI & CogVideoX APIs (falls back to animated Pollinations only if APIs fail).'
+      : 'Upload any reference photo and animate real character & scene motion via Wan 2.1 I2V, Fal.ai, Replicate, Google Veo & LTX-Video.';
 
   return (
     <section
@@ -822,18 +1009,30 @@ export function PromptPanel({
               <button
                 type="button"
                 onClick={toggleVoiceInput}
+                disabled={isTranscribingVoice}
                 aria-pressed={isListening}
-                aria-label={isListening ? 'Stop voice input' : 'Speak prompt with microphone'}
-                className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 ${
+                aria-label={
+                  isTranscribingVoice
+                    ? 'Transcribing audio'
+                    : isListening
+                    ? 'Stop voice input'
+                    : 'Speak prompt with microphone'
+                }
+                className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-lg px-3.5 py-1.5 text-xs font-semibold whitespace-nowrap transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:opacity-60 ${
                   isListening
                     ? 'border border-rose-400/70 bg-rose-500/20 text-rose-200 shadow-[0_0_20px_rgba(244,63,94,0.45)]'
                     : 'border border-cyan-400/50 bg-cyan-400/15 text-cyan-200 shadow-[0_0_18px_rgba(34,211,238,0.35)] hover:bg-cyan-400/25 hover:shadow-[0_0_24px_rgba(34,211,238,0.55)]'
                 }`}
               >
-                {isListening ? (
+                {isTranscribingVoice ? (
+                  <>
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-300" />
+                    <span>Transcribing (Whisper)...</span>
+                  </>
+                ) : isListening ? (
                   <>
                     <MicOff className="h-3.5 w-3.5 text-rose-300" />
-                    <span>Listening ({activeVoiceLang.nativeLabel})...</span>
+                    <span>Stop ({activeVoiceLang.nativeLabel})</span>
                   </>
                 ) : (
                   <>
@@ -1223,7 +1422,7 @@ export function PromptPanel({
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {videoSourceMode === 'hf-gpu'
-                    ? 'Auto-routes SiliconFlow Wan 2.1 → HF Inference (Wan 2.1 · CogVideoX-5b · LTX) → Agnes AI (Agnes-Video-2.5) → Google Veo → Animated Pollinations fallback.'
+                    ? 'Auto-routes SiliconFlow → HF Inference → Agnes AI → Fal.ai → Replicate → Google Veo → Animated Pollinations fallback.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>
@@ -1245,7 +1444,12 @@ export function PromptPanel({
                     isEngineSettingsOpen ||
                     videoSourceMode === 'custom-backend' ||
                     hfToken.trim() ||
-                    agnesApiKey.trim()
+                    agnesApiKey.trim() ||
+                    falKey.trim() ||
+                    replicateToken.trim() ||
+                    togetherKey.trim() ||
+                    groqKey.trim() ||
+                    openRouterKey.trim()
                       ? 'border-cyan-400/45 bg-cyan-400/10 text-cyan-200'
                       : 'border-white/10 bg-[#0D1118] text-slate-300 hover:border-white/25'
                   }`}
@@ -1274,7 +1478,7 @@ export function PromptPanel({
                   Real Text-to-Video AI APIs
                 </span>
                 <span className="text-[10px] text-slate-400 whitespace-nowrap">
-                  Wan 2.1 · Agnes 2.5 · CogVideoX · Veo
+                  Wan 2.1 · Fal.ai · Replicate · Agnes
                 </span>
               </button>
 
@@ -1311,15 +1515,23 @@ export function PromptPanel({
                       <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
                       Free Hugging Face Token (Optional - Faster Queue)
                     </label>
-                    {hfToken.trim() && (
-                      <button
-                        type="button"
-                        onClick={() => onHfTokenChange('')}
-                        className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
-                      >
-                        Clear
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {hfToken.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onHfTokenChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div className="relative flex items-center">
                     <input
@@ -1359,15 +1571,23 @@ export function PromptPanel({
                       <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
                       5. Agnes AI Free Video Key (Agnes-Video-2.5)
                     </label>
-                    {agnesApiKey.trim() && (
-                      <button
-                        type="button"
-                        onClick={() => onAgnesApiKeyChange('')}
-                        className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
-                      >
-                        Clear
-                      </button>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {agnesApiKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onAgnesApiKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
                   </div>
                   <div className="relative flex items-center">
                     <input
@@ -1395,6 +1615,269 @@ export function PromptPanel({
                   <p className="text-[11px] text-slate-500">
                     Saved in Engine Vault / localStorage. Adds Agnes-Video-2.5 capacity alongside SiliconFlow and Hugging Face.
                   </p>
+                </div>
+
+                {/* 6. Fal.ai Video Key (Kling / Minimax / Wan) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-fal-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                      6. Fal.ai Video Key (Kling / Minimax / Wan)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {falKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onFalKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-fal-key"
+                      type={showFalKey ? 'text' : 'password'}
+                      value={falKey}
+                      onChange={(e) => onFalKeyChange(e.target.value)}
+                      placeholder="key_id:secret (VITE_FAL_KEY optional)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowFalKey((s) => !s)}
+                      aria-label={showFalKey ? 'Hide Fal.ai key' : 'Show Fal.ai key'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showFalKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 7. Replicate API Token (Wan2.1 / SadTalker) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-replicate-token"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                      7. Replicate API Token (Wan2.1 / SadTalker)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {replicateToken.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onReplicateTokenChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-replicate-token"
+                      type={showReplicateToken ? 'text' : 'password'}
+                      value={replicateToken}
+                      onChange={(e) => onReplicateTokenChange(e.target.value)}
+                      placeholder="r8_... (VITE_REPLICATE_API_TOKEN optional)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowReplicateToken((s) => !s)}
+                      aria-label={showReplicateToken ? 'Hide Replicate token' : 'Show Replicate token'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showReplicateToken ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 8. Together AI Key (FLUX Images & Prompt Enhancer) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-together-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-emerald-300" />
+                      8. Together AI Key (FLUX Images &amp; Prompt Enhancer)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {togetherKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onTogetherKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-together-key"
+                      type={showTogetherKey ? 'text' : 'password'}
+                      value={togetherKey}
+                      onChange={(e) => onTogetherKeyChange(e.target.value)}
+                      placeholder="tgp_v1_... (VITE_TOGETHER_API_KEY optional)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowTogetherKey((s) => !s)}
+                      aria-label={showTogetherKey ? 'Hide Together AI key' : 'Show Together AI key'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showTogetherKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 9. Groq Free API Key (VITE_GROQ_API_KEY) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-groq-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-emerald-300" />
+                      9. Groq Free API Key (VITE_GROQ_API_KEY)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {groqKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onGroqKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-groq-key"
+                      type={showGroqKey ? 'text' : 'password'}
+                      value={groqKey}
+                      onChange={(e) => onGroqKeyChange(e.target.value)}
+                      placeholder="gsk_... (Llama 3.3 Enhance & Whisper Voice Input)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowGroqKey((s) => !s)}
+                      aria-label={showGroqKey ? 'Hide Groq API key' : 'Show Groq API key'}
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showGroqKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* 10. OpenRouter Free API Key (VITE_OPENROUTER_API_KEY) */}
+                <div className="space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-openrouter-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-emerald-300" />
+                      10. OpenRouter Free API Key (VITE_OPENROUTER_API_KEY)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {openRouterKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onOpenRouterKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative flex items-center">
+                    <input
+                      id="free-openrouter-key"
+                      type={showOpenRouterKey ? 'text' : 'password'}
+                      value={openRouterKey}
+                      onChange={(e) => onOpenRouterKeyChange(e.target.value)}
+                      placeholder="sk-or-... (Llama 3.3 :free & Gemini :free fallback)"
+                      autoComplete="off"
+                      className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowOpenRouterKey((s) => !s)}
+                      aria-label={
+                        showOpenRouterKey ? 'Hide OpenRouter key' : 'Show OpenRouter key'
+                      }
+                      className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                    >
+                      {showOpenRouterKey ? (
+                        <EyeOff className="h-3.5 w-3.5" />
+                      ) : (
+                        <Eye className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* Custom Backend URL */}

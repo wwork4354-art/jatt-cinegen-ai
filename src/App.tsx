@@ -94,6 +94,11 @@ export default function App() {
     (import.meta.env.VITE_POLLINATIONS_API_KEY as string | undefined) ??
     '';
   const envAgnes = (import.meta.env.VITE_AGNES_API_KEY as string | undefined) ?? '';
+  const envFal = (import.meta.env.VITE_FAL_KEY as string | undefined) ?? '';
+  const envReplicate = (import.meta.env.VITE_REPLICATE_API_TOKEN as string | undefined) ?? '';
+  const envTogether = (import.meta.env.VITE_TOGETHER_API_KEY as string | undefined) ?? '';
+  const envGroq = (import.meta.env.VITE_GROQ_API_KEY as string | undefined) ?? '';
+  const envOpenRouter = (import.meta.env.VITE_OPENROUTER_API_KEY as string | undefined) ?? '';
 
   const [hfToken, setHfToken] = useState<string>(() => {
     try {
@@ -113,6 +118,11 @@ export default function App() {
           siliconFlowKey: parsed.siliconFlowKey || envSf,
           pollinationsKey: parsed.pollinationsKey || envPollinations,
           agnesKey: parsed.agnesKey || envAgnes,
+          falKey: parsed.falKey || envFal,
+          replicateToken: parsed.replicateToken || envReplicate,
+          togetherKey: parsed.togetherKey || envTogether,
+          groqKey: parsed.groqKey || envGroq,
+          openRouterKey: parsed.openRouterKey || envOpenRouter,
         };
       }
     } catch {
@@ -124,6 +134,11 @@ export default function App() {
       siliconFlowKey: envSf,
       pollinationsKey: envPollinations,
       agnesKey: envAgnes,
+      falKey: envFal,
+      replicateToken: envReplicate,
+      togetherKey: envTogether,
+      groqKey: envGroq,
+      openRouterKey: envOpenRouter,
     };
   });
   const [isEngineVaultOpen, setIsEngineVaultOpen] = useState(false);
@@ -285,6 +300,10 @@ export default function App() {
     setIsEnhancing(true);
     setErrorMessage(null);
     const mode = activeTab === 'creations' ? 'text-to-video' : activeTab;
+    const activeGeminiKey = (engineVaultKeys.geminiKey || envGemini).trim();
+    const activeGroqKey = (engineVaultKeys.groqKey || envGroq).trim();
+    const activeOpenRouterKey = (engineVaultKeys.openRouterKey || envOpenRouter).trim();
+    const activeTogetherKey = (engineVaultKeys.togetherKey || envTogether).trim();
 
     try {
       const res = await fetch('/api/enhance-prompt', {
@@ -295,6 +314,10 @@ export default function App() {
           mode,
           style: stylePreset,
           cameraMotion,
+          geminiKey: activeGeminiKey || undefined,
+          groqKey: activeGroqKey || undefined,
+          openRouterKey: activeOpenRouterKey || undefined,
+          togetherKey: activeTogetherKey || undefined,
         }),
       });
       const contentType = res.headers.get('content-type') || '';
@@ -308,6 +331,92 @@ export default function App() {
       setPreviousPrompt(trimmed);
       setPrompt(data.enhancedPrompt);
     } catch (err) {
+      const systemInstruction =
+        mode === 'lip-sync'
+          ? 'You are an expert dialogue and spoken script writer for talking avatars. Rewrite and polish the user input into a natural, expressive spoken monologue (2-4 crisp sentences, under 75 words) in the same language. Return ONLY the final spoken script text with no quotes or markdown.'
+          : 'You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive prompt under 75 words. Return ONLY the enhanced prompt text with no quotes or markdown.';
+      const userMessage =
+        mode === 'lip-sync'
+          ? `Polish or expand this spoken dialogue script for a talking avatar video (${stylePreset}): "${trimmed}"`
+          : `Enhance this creative prompt for ${mode} (${stylePreset}, ${cameraMotion}): "${trimmed}"`;
+
+      const tryOpenAiCompatible = async (
+        endpoint: string,
+        apiKey: string,
+        models: string[],
+        extraHeaders?: Record<string, string>
+      ): Promise<string | null> => {
+        for (const model of models) {
+          try {
+            const directRes = await fetch(endpoint, {
+              method: 'POST',
+              headers: {
+                Authorization: `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                ...(extraHeaders ?? {}),
+              },
+              body: JSON.stringify({
+                model,
+                messages: [
+                  { role: 'system', content: systemInstruction },
+                  { role: 'user', content: userMessage },
+                ],
+                max_tokens: 180,
+                temperature: 0.7,
+              }),
+            });
+            if (!directRes.ok) continue;
+            const directData = (await directRes.json()) as {
+              choices?: Array<{ message?: { content?: string } }>;
+            };
+            const text = (directData.choices?.[0]?.message?.content ?? '')
+              .trim()
+              .replace(/^["']|["']$/g, '');
+            if (text) return text;
+          } catch {
+            // Try next model
+          }
+        }
+        return null;
+      };
+
+      let fallbackText: string | null = null;
+      if (!fallbackText && activeGroqKey) {
+        fallbackText = await tryOpenAiCompatible(
+          'https://api.groq.com/openai/v1/chat/completions',
+          activeGroqKey,
+          ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant']
+        );
+      }
+      if (!fallbackText && activeOpenRouterKey) {
+        fallbackText = await tryOpenAiCompatible(
+          'https://openrouter.ai/api/v1/chat/completions',
+          activeOpenRouterKey,
+          ['meta-llama/llama-3.3-70b-instruct:free', 'google/gemini-2.0-flash-exp:free'],
+          {
+            'HTTP-Referer': window.location.origin,
+            'X-Title': 'Jatt CineGen AI',
+          }
+        );
+      }
+      if (!fallbackText && activeTogetherKey) {
+        fallbackText = await tryOpenAiCompatible(
+          'https://api.together.ai/v1/chat/completions',
+          activeTogetherKey,
+          ['meta-llama/Llama-3.3-70B-Instruct-Turbo']
+        );
+      }
+
+      if (fallbackText) {
+        const finalEnhanced =
+          mode === 'text-to-video'
+            ? enhanceTextToVideoPromptFraming(fallbackText)
+            : fallbackText;
+        setPreviousPrompt(trimmed);
+        setPrompt(finalEnhanced);
+        return;
+      }
+
       setErrorMessage(err instanceof Error ? err.message : 'Prompt enhancement failed.');
     } finally {
       setIsEnhancing(false);
@@ -319,6 +428,7 @@ export default function App() {
     if (!uploadedImageUrl) return;
     setErrorMessage(null);
     const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
+    const activeReplicateToken = (engineVaultKeys.replicateToken || envReplicate).trim();
     const activeVoice = getVoiceLanguageById(voiceLanguageId);
     const displayLabel =
       lipSyncAudioMode === 'upload' && lipSyncAudioFile
@@ -386,6 +496,7 @@ export default function App() {
               imageDataUrl: imagePayload,
               audioDataUrl,
               hfToken: activeHfToken || undefined,
+              replicateToken: activeReplicateToken || undefined,
             }),
           });
 
@@ -488,7 +599,9 @@ export default function App() {
           const directLipSync = await runDirectBrowserLipSync({
             imageDataUrl: imagePayload,
             audioBlob,
+            audioDataUrl: audioDataUrl || undefined,
             hfToken: activeHfToken,
+            replicateToken: activeReplicateToken,
             onProgress: (percent, statusMessage) => {
               setProgress((p) =>
                 p.active ? { ...p, percent, statusMessage } : p
@@ -607,11 +720,13 @@ export default function App() {
     const activeSiliconKey = (engineVaultKeys.siliconFlowKey || envSf).trim();
     const activePollinationsKey = (engineVaultKeys.pollinationsKey || envPollinations).trim();
     const activeAgnesKey = (engineVaultKeys.agnesKey || envAgnes).trim();
+    const activeFalKey = (engineVaultKeys.falKey || envFal).trim();
+    const activeReplicateToken = (engineVaultKeys.replicateToken || envReplicate).trim();
 
     startTimer(
       targetMode === 'image-to-video'
-        ? 'Routing photo to real Image-to-Video AI (Wan 2.1 / LTX-Video)...'
-        : 'Routing to real Text-to-Video AI (Wan 2.1 / CogVideoX / Agnes 2.5)...'
+        ? 'Routing photo to real Image-to-Video AI (Wan 2.1 / Fal.ai / Replicate)...'
+        : 'Routing to real Text-to-Video AI (Wan 2.1 / Fal.ai / Replicate / Agnes 2.5)...'
     );
 
     let generatedRealMp4 = false;
@@ -622,7 +737,12 @@ export default function App() {
     try {
       const { englishPrompt } = await translatePromptToEnglish(
         trimmedPrompt,
-        voiceLanguageId
+        voiceLanguageId,
+        {
+          geminiKey: activeGeminiKey || undefined,
+          groqKey: (engineVaultKeys.groqKey || envGroq).trim() || undefined,
+          openRouterKey: (engineVaultKeys.openRouterKey || envOpenRouter).trim() || undefined,
+        }
       );
       const translatedBase = englishPrompt || trimmedPrompt;
       const effectivePrompt =
@@ -654,6 +774,8 @@ export default function App() {
             siliconFlowKey: activeSiliconKey || undefined,
             pollinationsKey: activePollinationsKey || undefined,
             agnesKey: activeAgnesKey || undefined,
+            falKey: activeFalKey || undefined,
+            replicateToken: activeReplicateToken || undefined,
           }),
         });
 
@@ -775,6 +897,8 @@ export default function App() {
           siliconFlowKey: activeSiliconKey,
           pollinationsKey: activePollinationsKey,
           agnesKey: activeAgnesKey,
+          falKey: activeFalKey,
+          replicateToken: activeReplicateToken,
           onProgress: (percent, statusMessage) => {
             setProgress((prev) =>
               prev.active ? { ...prev, percent, statusMessage } : prev
@@ -913,11 +1037,17 @@ export default function App() {
     if (activeTab === 'text-to-image') {
       startTimer('Preparing AI prompt...');
       try {
-        const { englishPrompt } = await translatePromptToEnglish(trimmedPrompt, voiceLanguageId);
+        const { englishPrompt } = await translatePromptToEnglish(trimmedPrompt, voiceLanguageId, {
+          geminiKey: (engineVaultKeys.geminiKey || envGemini).trim() || undefined,
+          groqKey: (engineVaultKeys.groqKey || envGroq).trim() || undefined,
+          openRouterKey: (engineVaultKeys.openRouterKey || envOpenRouter).trim() || undefined,
+        });
+        const activeTogetherKey = (engineVaultKeys.togetherKey || envTogether).trim();
         const result = await fetchFreeAiImageWithWaterfall({
           prompt: englishPrompt || trimmedPrompt,
           aspectRatio,
           style: stylePreset,
+          togetherKey: activeTogetherKey || undefined,
           onStatus: (msg) => {
             setProgress((p) => (p.active ? { ...p, percent: 48, statusMessage: msg } : p));
           },
@@ -1192,6 +1322,11 @@ export default function App() {
     (engineVaultKeys.siliconFlowKey || envSf).trim(),
     (engineVaultKeys.pollinationsKey || envPollinations).trim(),
     (engineVaultKeys.agnesKey || envAgnes).trim(),
+    (engineVaultKeys.falKey || envFal).trim(),
+    (engineVaultKeys.replicateToken || envReplicate).trim(),
+    (engineVaultKeys.togetherKey || envTogether).trim(),
+    (engineVaultKeys.groqKey || envGroq).trim(),
+    (engineVaultKeys.openRouterKey || envOpenRouter).trim(),
   ].filter(Boolean).length;
 
   return (
@@ -1285,10 +1420,32 @@ export default function App() {
                   onAgnesApiKeyChange={(nextKey) => {
                     setEngineVaultKeys((prev) => ({ ...prev, agnesKey: nextKey }));
                   }}
+                  falKey={engineVaultKeys.falKey || envFal}
+                  onFalKeyChange={(nextKey) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, falKey: nextKey }));
+                  }}
+                  replicateToken={engineVaultKeys.replicateToken || envReplicate}
+                  onReplicateTokenChange={(nextToken) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, replicateToken: nextToken }));
+                  }}
+                  togetherKey={engineVaultKeys.togetherKey || envTogether}
+                  onTogetherKeyChange={(nextKey) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, togetherKey: nextKey }));
+                  }}
+                  groqKey={engineVaultKeys.groqKey || envGroq}
+                  onGroqKeyChange={(nextKey) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, groqKey: nextKey }));
+                  }}
+                  openRouterKey={engineVaultKeys.openRouterKey || envOpenRouter}
+                  onOpenRouterKeyChange={(nextKey) => {
+                    setEngineVaultKeys((prev) => ({ ...prev, openRouterKey: nextKey }));
+                  }}
                   hasGpuKeys={Boolean(
                     (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
                       (engineVaultKeys.siliconFlowKey || envSf).trim() ||
                       (engineVaultKeys.agnesKey || envAgnes).trim() ||
+                      (engineVaultKeys.falKey || envFal).trim() ||
+                      (engineVaultKeys.replicateToken || envReplicate).trim() ||
                       (engineVaultKeys.geminiKey || envGemini).trim()
                   )}
                   onOpenEngineVault={() => setIsEngineVaultOpen(true)}
@@ -1404,12 +1561,17 @@ export default function App() {
       />
 
       <EngineVaultModal
-        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${engineVaultKeys.pollinationsKey ?? ''}-${engineVaultKeys.agnesKey ?? ''}-${customBackendUrl}`}
+        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${engineVaultKeys.pollinationsKey ?? ''}-${engineVaultKeys.agnesKey ?? ''}-${engineVaultKeys.falKey ?? ''}-${engineVaultKeys.replicateToken ?? ''}-${engineVaultKeys.togetherKey ?? ''}-${engineVaultKeys.groqKey ?? ''}-${engineVaultKeys.openRouterKey ?? ''}-${customBackendUrl}`}
         isOpen={isEngineVaultOpen}
         keys={{
           ...engineVaultKeys,
           hfToken: engineVaultKeys.hfToken || hfToken,
           agnesKey: engineVaultKeys.agnesKey || envAgnes,
+          falKey: engineVaultKeys.falKey || envFal,
+          replicateToken: engineVaultKeys.replicateToken || envReplicate,
+          togetherKey: engineVaultKeys.togetherKey || envTogether,
+          groqKey: engineVaultKeys.groqKey || envGroq,
+          openRouterKey: engineVaultKeys.openRouterKey || envOpenRouter,
         }}
         customBackendUrl={customBackendUrl}
         onSave={(nextKeys, nextBackendUrl) => {

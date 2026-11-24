@@ -283,14 +283,124 @@ async function fetchRealPhotoFallbackList(
   return results;
 }
 
+async function tryTogetherFluxImage(params: {
+  prompt: string;
+  width: number;
+  height: number;
+  togetherKey: string;
+  onStatus?: (msg: string) => void;
+}): Promise<FetchedAiImageResult | null> {
+  const { prompt, width, height, togetherKey, onStatus } = params;
+  onStatus?.('Generating HD image via Together AI (FLUX.1-schnell-Free)...');
+
+  try {
+    const proxyRes = await fetch('/api/generate/together-image', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        prompt,
+        width,
+        height,
+        togetherKey,
+      }),
+    });
+
+    if (proxyRes.ok) {
+      const data = (await proxyRes.json()) as {
+        imageDataUrl?: string;
+        modelUsed?: string;
+      };
+      if (data.imageDataUrl) {
+        const res = await fetch(data.imageDataUrl);
+        const blob = await res.blob();
+        const objectUrl = URL.createObjectURL(blob);
+        try {
+          const img = await loadImageFromObjectUrl(objectUrl, 12000);
+          return {
+            img,
+            blob,
+            objectUrl,
+            providerLabel: `Together AI (${data.modelUsed?.includes('Free') ? 'FLUX.1-schnell-Free' : 'FLUX.1-schnell'})`,
+            width: img.naturalWidth,
+            height: img.naturalHeight,
+          };
+        } catch (err) {
+          URL.revokeObjectURL(objectUrl);
+          throw err;
+        }
+      }
+    } else if (proxyRes.status !== 404) {
+      return null;
+    }
+  } catch {
+    // Try direct Together AI REST API below when running in static deployment
+  }
+
+  const models = ['black-forest-labs/FLUX.1-schnell-Free', 'black-forest-labs/FLUX.1-schnell'];
+  for (const model of models) {
+    try {
+      const res = await fetch('https://api.together.ai/v1/images/generations', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${togetherKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          prompt,
+          width,
+          height,
+          steps: 4,
+          n: 1,
+          response_format: 'b64_json',
+        }),
+      });
+      if (!res.ok) {
+        if (res.status === 401 || res.status === 402 || res.status === 403 || res.status === 429) {
+          return null;
+        }
+        continue;
+      }
+      const data = (await res.json()) as {
+        data?: Array<{ b64_json?: string; url?: string }>;
+      };
+      const first = data.data?.[0];
+      let blob: Blob | null = null;
+      if (first?.b64_json) {
+        const dataRes = await fetch(`data:image/jpeg;base64,${first.b64_json}`);
+        blob = await dataRes.blob();
+      } else if (first?.url) {
+        const urlRes = await fetch(first.url);
+        if (urlRes.ok) blob = await urlRes.blob();
+      }
+      if (!blob || blob.size < 4000) continue;
+      const objectUrl = URL.createObjectURL(blob);
+      const img = await loadImageFromObjectUrl(objectUrl, 12000);
+      return {
+        img,
+        blob,
+        objectUrl,
+        providerLabel: `Together AI (${model.includes('Free') ? 'FLUX.1-schnell-Free' : 'FLUX.1-schnell'})`,
+        width: img.naturalWidth,
+        height: img.naturalHeight,
+      };
+    } catch {
+      // Fall through to Pollinations Flux
+    }
+  }
+
+  return null;
+}
+
 export async function fetchFreeAiImageWithWaterfall(params: {
   prompt: string;
   aspectRatio: AspectRatio;
   style: StylePresetId;
   seed?: number;
+  togetherKey?: string;
   onStatus?: (msg: string) => void;
 }): Promise<FetchedAiImageResult> {
-  const { prompt, aspectRatio, style, onStatus } = params;
+  const { prompt, aspectRatio, style, togetherKey, onStatus } = params;
   const randomSeed = params.seed ?? Math.floor(100000 + Math.random() * 8999999);
   const { fetchWidth, fetchHeight } = getWaterfallDimensions(aspectRatio);
 
@@ -299,6 +409,20 @@ export async function fetchFreeAiImageWithWaterfall(params: {
     styleSuffix ? `${prompt}, ${styleSuffix}` : prompt
   );
   const encodedPrompt = encodeURIComponent(cleanPrompt);
+
+  if (togetherKey?.trim()) {
+    const togetherResult = await tryTogetherFluxImage({
+      prompt: cleanPrompt,
+      width: fetchWidth,
+      height: fetchHeight,
+      togetherKey: togetherKey.trim(),
+      onStatus,
+    });
+    if (togetherResult) {
+      return togetherResult;
+    }
+    onStatus?.('Together AI busy or quota reached — switching to Pollinations Flux AI...');
+  }
 
   const primaryFluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&model=flux&seed=${randomSeed}`;
   const backupTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=turbo&seed=${randomSeed + 99}`;

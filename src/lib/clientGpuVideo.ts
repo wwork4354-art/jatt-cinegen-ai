@@ -797,6 +797,254 @@ async function tryDirectBrowserAgnesAiVideo(params: {
   throw new Error('Agnes AI (Agnes-Video-2.5) timed out');
 }
 
+async function tryDirectBrowserFalAiVideo(params: {
+  falKey: string;
+  prompt: string;
+  negativePrompt?: string;
+  mode: 'text-to-video' | 'image-to-video';
+  aspectRatio: AspectRatio;
+  imageDataUrl?: string;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { falKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, onProgress } = params;
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const width = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 768 : 1280;
+  const height = aspectRatio === '9:16' ? 1280 : aspectRatio === '1:1' ? 768 : 720;
+
+  const models = isI2v
+    ? [
+        { id: 'fal-ai/wan/v2.1/1.3b/image-to-video', label: 'Fal.ai Wan 2.1 I2V' },
+        { id: 'fal-ai/minimax/video-01/image-to-video', label: 'Fal.ai Minimax I2V' },
+      ]
+    : [
+        { id: 'fal-ai/wan/v2.1/1.3b/text-to-video', label: 'Fal.ai Wan 2.1' },
+        { id: 'fal-ai/minimax-video', label: 'Fal.ai Minimax' },
+      ];
+
+  let lastErr = 'Fal.ai video models unavailable';
+  for (const model of models) {
+    onProgress(28, `Routing to ${model.label}...`);
+    const body: Record<string, unknown> = {
+      prompt,
+      ...(negativePrompt && model.id.includes('wan') ? { negative_prompt: negativePrompt } : {}),
+      ...(model.id.includes('wan') ? { aspect_ratio: aspectRatio } : {}),
+      ...(isI2v && imageDataUrl ? { image_url: imageDataUrl } : {}),
+    };
+
+    const submitRes = await withTimeout(
+      fetch(`https://queue.fal.run/${model.id}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Key ${falKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+      }),
+      12000,
+      `${model.label} submit`
+    );
+
+    if (!submitRes.ok) {
+      lastErr = `${model.label} HTTP ${submitRes.status}`;
+      if (submitRes.status === 401 || submitRes.status === 402 || submitRes.status === 403) {
+        throw new Error(lastErr);
+      }
+      continue;
+    }
+
+    const queued = (await submitRes.json()) as {
+      request_id?: string;
+      status_url?: string;
+      response_url?: string;
+      video?: { url?: string };
+    };
+
+    if (queued.video?.url) {
+      const mediaRes = await withTimeout(fetch(queued.video.url), 25000, `Download ${model.label}`);
+      if (!mediaRes.ok) throw new Error(`Failed to fetch ${model.label} MP4`);
+      const blob = await mediaRes.blob();
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: `Rendered via ${model.label}`,
+      };
+    }
+
+    const statusUrl =
+      queued.status_url ||
+      (queued.request_id
+        ? `https://queue.fal.run/${model.id}/requests/${encodeURIComponent(queued.request_id)}/status`
+        : '');
+    const responseUrl =
+      queued.response_url ||
+      (queued.request_id
+        ? `https://queue.fal.run/${model.id}/requests/${encodeURIComponent(queued.request_id)}`
+        : '');
+    if (!statusUrl || !responseUrl) continue;
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < 42000) {
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      onProgress(Math.min(82, 36 + elapsedSec), `Generating motion frames via ${model.label}...`);
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const statusRes = await withTimeout(
+        fetch(statusUrl, { headers: { Authorization: `Key ${falKey}` } }),
+        8000,
+        `${model.label} status`
+      );
+      if (!statusRes.ok) break;
+      const statusData = (await statusRes.json()) as { status?: string; error?: string };
+      if (statusData.status === 'COMPLETED') {
+        const resRes = await withTimeout(
+          fetch(responseUrl, { headers: { Authorization: `Key ${falKey}` } }),
+          10000,
+          `${model.label} result`
+        );
+        if (!resRes.ok) throw new Error(`${model.label} result HTTP ${resRes.status}`);
+        const resJson = (await resRes.json()) as {
+          video?: { url?: string };
+          output?: { video?: { url?: string } };
+        };
+        const videoUrl = resJson.video?.url || resJson.output?.video?.url || '';
+        if (!videoUrl) throw new Error(`${model.label} returned no video URL`);
+        onProgress(88, `Downloading MP4 from ${model.label}...`);
+        const mediaRes = await withTimeout(fetch(videoUrl), 25000, `Download ${model.label}`);
+        if (!mediaRes.ok) throw new Error(`Failed to fetch ${model.label} MP4`);
+        const blob = await mediaRes.blob();
+        return {
+          blob,
+          mediaUrl: URL.createObjectURL(blob),
+          mimeType: blob.type || 'video/mp4',
+          width,
+          height,
+          engineLabel: `Rendered via ${model.label}`,
+        };
+      }
+      if (statusData.status === 'FAILED' || statusData.error) {
+        throw new Error(statusData.error || `${model.label} failed`);
+      }
+    }
+    lastErr = `${model.label} timed out`;
+  }
+
+  throw new Error(lastErr);
+}
+
+async function tryDirectBrowserReplicateVideo(params: {
+  replicateToken: string;
+  prompt: string;
+  negativePrompt?: string;
+  mode: 'text-to-video' | 'image-to-video';
+  aspectRatio: AspectRatio;
+  imageDataUrl?: string;
+  onProgress: (percent: number, message: string) => void;
+}): Promise<ClientGpuVideoResult> {
+  const { replicateToken, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, onProgress } = params;
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 640 : 832;
+  const height = aspectRatio === '9:16' ? 832 : aspectRatio === '1:1' ? 640 : 480;
+
+  const models = isI2v
+    ? [{ id: 'wan-video/wan-2.1-i2v-480p', label: 'Replicate Wan 2.1 I2V' }]
+    : [
+        { id: 'wan-video/wan-2.1-t2v-480p', label: 'Replicate Wan 2.1' },
+        { id: 'wan-video/wan-2.1-1.3b', label: 'Replicate Wan 2.1 1.3B' },
+      ];
+
+  let lastErr = 'Replicate video models unavailable';
+  for (const model of models) {
+    onProgress(30, `Routing to ${model.label}...`);
+    const createRes = await withTimeout(
+      fetch(`https://api.replicate.com/v1/models/${model.id}/predictions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${replicateToken}`,
+          'Content-Type': 'application/json',
+          Prefer: 'wait=10',
+        },
+        body: JSON.stringify({
+          input: {
+            prompt,
+            ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+            aspect_ratio: aspectRatio,
+            sample_steps: 25,
+            ...(isI2v && imageDataUrl ? { image: imageDataUrl } : {}),
+          },
+        }),
+      }),
+      14000,
+      `${model.label} submit`
+    );
+
+    if (!createRes.ok) {
+      lastErr = `${model.label} HTTP ${createRes.status}`;
+      if (
+        createRes.status === 401 ||
+        createRes.status === 402 ||
+        createRes.status === 403 ||
+        createRes.status === 429
+      ) {
+        throw new Error(lastErr);
+      }
+      continue;
+    }
+
+    let pred = (await createRes.json()) as {
+      id?: string;
+      status?: string;
+      output?: string | string[];
+      error?: string;
+      urls?: { get?: string };
+    };
+
+    const startedAt = Date.now();
+    while ((pred.status === 'starting' || pred.status === 'processing') && Date.now() - startedAt < 42000) {
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      onProgress(Math.min(82, 36 + elapsedSec), `Generating Wan 2.1 frames via ${model.label}...`);
+      await new Promise((r) => setTimeout(r, 3000));
+      const pollUrl = pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
+      if (!pollUrl) break;
+      const pollRes = await withTimeout(
+        fetch(pollUrl, { headers: { Authorization: `Bearer ${replicateToken}` } }),
+        8000,
+        `${model.label} poll`
+      );
+      if (!pollRes.ok) throw new Error(`${model.label} poll HTTP ${pollRes.status}`);
+      pred = (await pollRes.json()) as typeof pred;
+    }
+
+    if (pred.status === 'succeeded') {
+      const outUrl =
+        typeof pred.output === 'string'
+          ? pred.output
+          : Array.isArray(pred.output)
+          ? pred.output.find((item) => typeof item === 'string')
+          : undefined;
+      if (!outUrl) throw new Error(`${model.label} returned no video URL`);
+      onProgress(88, `Downloading MP4 from ${model.label}...`);
+      const mediaRes = await withTimeout(fetch(outUrl), 25000, `Download ${model.label}`);
+      if (!mediaRes.ok) throw new Error(`Failed to fetch ${model.label} MP4`);
+      const blob = await mediaRes.blob();
+      return {
+        blob,
+        mediaUrl: URL.createObjectURL(blob),
+        mimeType: blob.type || 'video/mp4',
+        width,
+        height,
+        engineLabel: `Rendered via ${model.label}`,
+      };
+    }
+
+    lastErr = pred.error || `${model.label} failed`;
+  }
+
+  throw new Error(lastErr);
+}
+
 export async function runDirectBrowserAiVideo(params: {
   prompt: string;
   mode: 'text-to-video' | 'image-to-video';
@@ -808,6 +1056,8 @@ export async function runDirectBrowserAiVideo(params: {
   siliconFlowKey?: string;
   pollinationsKey?: string;
   agnesKey?: string;
+  falKey?: string;
+  replicateToken?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult | null> {
   const {
@@ -821,6 +1071,8 @@ export async function runDirectBrowserAiVideo(params: {
     siliconFlowKey,
     pollinationsKey,
     agnesKey,
+    falKey,
+    replicateToken,
     onProgress,
   } = params;
   const resolvedGemini = geminiKey?.trim() || '';
@@ -828,6 +1080,8 @@ export async function runDirectBrowserAiVideo(params: {
   const resolvedSf = siliconFlowKey?.trim() || '';
   const resolvedPollinations = pollinationsKey?.trim() || '';
   const resolvedAgnes = agnesKey?.trim() || '';
+  const resolvedFal = falKey?.trim() || '';
+  const resolvedReplicate = replicateToken?.trim() || '';
 
   const effectivePrompt =
     mode === 'text-to-video' ? enhanceTextToVideoPromptFraming(prompt) : prompt;
@@ -866,7 +1120,7 @@ export async function runDirectBrowserAiVideo(params: {
         onProgress,
       });
     } catch {
-      // Proceed to Google Veo / HF Gradio GPUs
+      // Proceed to Agnes AI / Fal.ai / Replicate
     }
   }
 
@@ -883,11 +1137,45 @@ export async function runDirectBrowserAiVideo(params: {
         onProgress,
       });
     } catch {
+      // Proceed to Fal.ai / Replicate
+    }
+  }
+
+  // 4. Fal.ai Video API (Wan 2.1 / Minimax)
+  if (resolvedFal) {
+    try {
+      return await tryDirectBrowserFalAiVideo({
+        falKey: resolvedFal,
+        prompt: effectivePrompt,
+        negativePrompt,
+        mode,
+        aspectRatio,
+        imageDataUrl,
+        onProgress,
+      });
+    } catch {
+      // Proceed to Replicate
+    }
+  }
+
+  // 5. Replicate Wan 2.1
+  if (resolvedReplicate) {
+    try {
+      return await tryDirectBrowserReplicateVideo({
+        replicateToken: resolvedReplicate,
+        prompt: effectivePrompt,
+        negativePrompt,
+        mode,
+        aspectRatio,
+        imageDataUrl,
+        onProgress,
+      });
+    } catch {
       // Proceed to Google Veo / HF Gradio GPUs
     }
   }
 
-  // 4. Google Veo 2.0
+  // 6. Google Veo 2.0
   if (resolvedGemini) {
     try {
       return await tryDirectBrowserGoogleVeo({
@@ -1123,11 +1411,14 @@ interface GradioParamMeta {
 export async function runDirectBrowserLipSync(params: {
   imageDataUrl: string;
   audioBlob: Blob;
+  audioDataUrl?: string;
   hfToken?: string;
+  replicateToken?: string;
   onProgress: (percent: number, message: string) => void;
 }): Promise<ClientGpuVideoResult | null> {
-  const { imageDataUrl, audioBlob, hfToken, onProgress } = params;
+  const { imageDataUrl, audioBlob, audioDataUrl, hfToken, replicateToken, onProgress } = params;
   const resolvedHf = hfToken?.trim() || '';
+  const resolvedReplicate = replicateToken?.trim() || '';
   const imageBlob = await resolveInputBlob(imageDataUrl);
   const opts = buildConnectOptions(resolvedHf);
 
@@ -1218,6 +1509,78 @@ export async function runDirectBrowserLipSync(params: {
       };
     } catch {
       // Try next SadTalker space
+    }
+  }
+
+  if (resolvedReplicate && audioDataUrl) {
+    try {
+      onProgress(52, 'Routing portrait + audio to Replicate SadTalker GPU...');
+      const createRes = await withTimeout(
+        fetch('https://api.replicate.com/v1/models/cjwbw/sadtalker/predictions', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resolvedReplicate}`,
+            'Content-Type': 'application/json',
+            Prefer: 'wait=10',
+          },
+          body: JSON.stringify({
+            input: {
+              source_image: imageDataUrl,
+              driven_audio: audioDataUrl,
+              preprocess: 'crop',
+              still_mode: true,
+              use_enhancer: false,
+            },
+          }),
+        }),
+        12000,
+        'Replicate SadTalker submit'
+      );
+      if (createRes.ok) {
+        let pred = (await createRes.json()) as {
+          id?: string;
+          status?: string;
+          output?: string | string[];
+          urls?: { get?: string };
+        };
+        const startedAt = Date.now();
+        while ((pred.status === 'starting' || pred.status === 'processing') && Date.now() - startedAt < 35000) {
+          await new Promise((r) => setTimeout(r, 3000));
+          const pollUrl = pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
+          if (!pollUrl) break;
+          const pollRes = await withTimeout(
+            fetch(pollUrl, { headers: { Authorization: `Bearer ${resolvedReplicate}` } }),
+            8000,
+            'Replicate SadTalker poll'
+          );
+          if (!pollRes.ok) break;
+          pred = (await pollRes.json()) as typeof pred;
+        }
+        if (pred.status === 'succeeded') {
+          const outUrl =
+            typeof pred.output === 'string'
+              ? pred.output
+              : Array.isArray(pred.output)
+              ? pred.output.find((item) => typeof item === 'string')
+              : undefined;
+          if (outUrl) {
+            const mediaRes = await withTimeout(fetch(outUrl), 25000, 'Download Replicate SadTalker MP4');
+            if (mediaRes.ok) {
+              const blob = await mediaRes.blob();
+              return {
+                blob,
+                mediaUrl: URL.createObjectURL(blob),
+                mimeType: blob.type || 'video/mp4',
+                width: 512,
+                height: 512,
+                engineLabel: 'Rendered via Replicate SadTalker',
+              };
+            }
+          }
+        }
+      }
+    } catch {
+      // Fall back to CineGen Smart Lip-Sync Animator
     }
   }
 

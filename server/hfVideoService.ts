@@ -137,11 +137,37 @@ async function connectSpaceFast(spaceId: string, hfToken?: string, timeoutMs = 8
   );
 }
 
+function isSafeExternalHttpsUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:') return false;
+    const host = parsed.hostname.toLowerCase();
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host === '::1' ||
+      host === '0.0.0.0' ||
+      host.startsWith('10.') ||
+      host.startsWith('192.168.') ||
+      host.startsWith('169.254.') ||
+      /^172\.(1[6-9]|2\d|3[0-1])\./.test(host)
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function downloadVideoBuffer(
   url: string,
   headers?: Record<string, string>,
   label = 'AI GPU'
 ): Promise<{ buffer: Buffer; mimeType: string }> {
+  if (!isSafeExternalHttpsUrl(url)) {
+    throw new Error(`${label} returned an invalid download URL`);
+  }
   const res = await withTimeout(fetch(url, headers ? { headers } : undefined), 28000, `Download MP4 from ${label}`);
   if (!res.ok) {
     throw new Error(`Failed to download generated MP4 (HTTP ${res.status})`);
@@ -526,6 +552,299 @@ async function tryAgnesAiVideo(params: {
   throw new Error('Agnes AI (Agnes-Video-2.5) timed out');
 }
 
+// Engine 2C: Fal.ai Queue REST API (Wan 2.1 / Minimax Video)
+async function tryFalAiVideo(params: {
+  apiKey: string;
+  prompt: string;
+  negativePrompt?: string;
+  mode: HfVideoMode;
+  aspectRatio: HfAspectRatio;
+  imageDataUrl?: string;
+  timeoutMs: number;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride: string }> {
+  const { apiKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, timeoutMs, onProgress, isAborted } =
+    params;
+
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const width = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 768 : 1280;
+  const height = aspectRatio === '9:16' ? 1280 : aspectRatio === '1:1' ? 768 : 720;
+
+  const candidateModels = isI2v
+    ? [
+        { id: 'fal-ai/wan/v2.1/1.3b/image-to-video', label: 'Fal.ai Wan 2.1 I2V' },
+        { id: 'fal-ai/minimax/video-01/image-to-video', label: 'Fal.ai Minimax I2V' },
+      ]
+    : [
+        { id: 'fal-ai/wan/v2.1/1.3b/text-to-video', label: 'Fal.ai Wan 2.1' },
+        { id: 'fal-ai/minimax-video', label: 'Fal.ai Minimax' },
+      ];
+
+  let lastError = 'Fal.ai video models unavailable';
+
+  for (const model of candidateModels) {
+    if (isAborted?.()) throw new Error('Aborted');
+    onProgress(30, `Routing to ${model.label}...`);
+
+    const submitPayload: Record<string, unknown> = {
+      prompt,
+      ...(negativePrompt && model.id.includes('wan') ? { negative_prompt: negativePrompt } : {}),
+      ...(model.id.includes('wan') ? { aspect_ratio: aspectRatio } : {}),
+    };
+    if (isI2v && imageDataUrl) {
+      submitPayload.image_url = imageDataUrl;
+    }
+
+    const submitRes = await withTimeout(
+      fetch(`https://queue.fal.run/${model.id}`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Key ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(submitPayload),
+      }),
+      12000,
+      `${model.label} submit`
+    );
+
+    if (!submitRes.ok) {
+      let detail = '';
+      try {
+        const errJson = (await submitRes.json()) as { detail?: string; message?: string };
+        detail = errJson.detail || errJson.message || '';
+      } catch {
+        // Ignore parse error
+      }
+      lastError = detail || `${model.label} HTTP ${submitRes.status}`;
+      if (submitRes.status === 401 || submitRes.status === 402 || submitRes.status === 403) {
+        throw new Error(lastError);
+      }
+      continue;
+    }
+
+    const queued = (await submitRes.json()) as {
+      request_id?: string;
+      status_url?: string;
+      response_url?: string;
+      video?: { url?: string };
+    };
+
+    if (queued.video?.url && isSafeExternalHttpsUrl(queued.video.url)) {
+      onProgress(88, `Downloading generated MP4 from ${model.label}...`);
+      const downloaded = await downloadVideoBuffer(queued.video.url, undefined, model.label);
+      return { ...downloaded, width, height, badgeOverride: `Rendered via ${model.label}` };
+    }
+
+    const requestId = queued.request_id;
+    const statusUrl =
+      queued.status_url ||
+      (requestId ? `https://queue.fal.run/${model.id}/requests/${encodeURIComponent(requestId)}/status` : '');
+    const responseUrl =
+      queued.response_url ||
+      (requestId ? `https://queue.fal.run/${model.id}/requests/${encodeURIComponent(requestId)}` : '');
+
+    if (!statusUrl || !responseUrl || !isSafeExternalHttpsUrl(statusUrl) || !isSafeExternalHttpsUrl(responseUrl)) {
+      lastError = `${model.label} returned incomplete queue metadata`;
+      continue;
+    }
+
+    const startedAt = Date.now();
+    const maxPollMs = Math.min(42000, Math.max(10000, timeoutMs - 4000));
+    while (Date.now() - startedAt < maxPollMs) {
+      if (isAborted?.()) throw new Error('Aborted');
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      onProgress(Math.min(82, 36 + elapsedSec), `Generating motion frames via ${model.label}...`);
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const statusRes = await withTimeout(
+        fetch(statusUrl, {
+          headers: { Authorization: `Key ${apiKey}` },
+        }),
+        8000,
+        `${model.label} status`
+      );
+
+      if (!statusRes.ok) {
+        lastError = `${model.label} status HTTP ${statusRes.status}`;
+        break;
+      }
+
+      const statusData = (await statusRes.json()) as { status?: string; error?: string };
+      if (statusData.status === 'COMPLETED') {
+        const resultRes = await withTimeout(
+          fetch(responseUrl, {
+            headers: { Authorization: `Key ${apiKey}` },
+          }),
+          10000,
+          `${model.label} result`
+        );
+        if (!resultRes.ok) {
+          throw new Error(`${model.label} result HTTP ${resultRes.status}`);
+        }
+        const resultJson = (await resultRes.json()) as {
+          video?: { url?: string };
+          output?: { video?: { url?: string } };
+        };
+        const videoUrl = resultJson.video?.url || resultJson.output?.video?.url || '';
+        if (!videoUrl) {
+          throw new Error(`${model.label} completed without a video URL`);
+        }
+        onProgress(88, `Downloading generated MP4 from ${model.label}...`);
+        const downloaded = await downloadVideoBuffer(videoUrl, undefined, model.label);
+        return { ...downloaded, width, height, badgeOverride: `Rendered via ${model.label}` };
+      }
+
+      if (statusData.status === 'FAILED' || statusData.error) {
+        throw new Error(statusData.error || `${model.label} job failed`);
+      }
+    }
+
+    lastError = `${model.label} timed out`;
+  }
+
+  throw new Error(lastError);
+}
+
+// Engine 2D: Replicate REST API (wan-video/wan-2.1-t2v-480p / wan-2.1-i2v-480p)
+async function tryReplicateVideo(params: {
+  apiKey: string;
+  prompt: string;
+  negativePrompt?: string;
+  mode: HfVideoMode;
+  aspectRatio: HfAspectRatio;
+  imageDataUrl?: string;
+  timeoutMs: number;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride: string }> {
+  const { apiKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, timeoutMs, onProgress, isAborted } =
+    params;
+
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const width = aspectRatio === '9:16' ? 480 : aspectRatio === '1:1' ? 640 : 832;
+  const height = aspectRatio === '9:16' ? 832 : aspectRatio === '1:1' ? 640 : 480;
+
+  const models = isI2v
+    ? [{ id: 'wan-video/wan-2.1-i2v-480p', label: 'Replicate Wan 2.1 I2V' }]
+    : [
+        { id: 'wan-video/wan-2.1-t2v-480p', label: 'Replicate Wan 2.1' },
+        { id: 'wan-video/wan-2.1-1.3b', label: 'Replicate Wan 2.1 1.3B' },
+      ];
+
+  let lastError = 'Replicate video models unavailable';
+
+  for (const model of models) {
+    if (isAborted?.()) throw new Error('Aborted');
+    onProgress(32, `Routing to ${model.label}...`);
+
+    const input: Record<string, unknown> = {
+      prompt,
+      ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+      aspect_ratio: aspectRatio,
+      sample_steps: 25,
+    };
+    if (isI2v && imageDataUrl) {
+      input.image = imageDataUrl;
+    }
+
+    const createRes = await withTimeout(
+      fetch(`https://api.replicate.com/v1/models/${model.id}/predictions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+          Prefer: 'wait=10',
+        },
+        body: JSON.stringify({ input }),
+      }),
+      14000,
+      `${model.label} submit`
+    );
+
+    if (!createRes.ok) {
+      let detail = '';
+      try {
+        const errJson = (await createRes.json()) as { detail?: string; error?: string };
+        detail = errJson.detail || errJson.error || '';
+      } catch {
+        // Ignore parse failure
+      }
+      lastError = detail || `${model.label} HTTP ${createRes.status}`;
+      if (
+        createRes.status === 401 ||
+        createRes.status === 402 ||
+        createRes.status === 403 ||
+        createRes.status === 429
+      ) {
+        throw new Error(lastError);
+      }
+      continue;
+    }
+
+    let pred = (await createRes.json()) as {
+      id?: string;
+      status?: string;
+      output?: string | string[];
+      error?: string;
+      urls?: { get?: string };
+    };
+
+    const startedAt = Date.now();
+    const maxPollMs = Math.min(42000, Math.max(10000, timeoutMs - 4000));
+    while (
+      (pred.status === 'starting' || pred.status === 'processing') &&
+      Date.now() - startedAt < maxPollMs
+    ) {
+      if (isAborted?.()) throw new Error('Aborted');
+      const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+      onProgress(Math.min(82, 38 + elapsedSec), `Generating Wan 2.1 frames via ${model.label}...`);
+      await new Promise((r) => setTimeout(r, 3000));
+
+      const pollUrl =
+        pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
+      if (!pollUrl || !isSafeExternalHttpsUrl(pollUrl)) break;
+
+      const pollRes = await withTimeout(
+        fetch(pollUrl, {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        }),
+        8000,
+        `${model.label} poll`
+      );
+      if (!pollRes.ok) {
+        throw new Error(`${model.label} poll HTTP ${pollRes.status}`);
+      }
+      pred = (await pollRes.json()) as typeof pred;
+    }
+
+    if (pred.status === 'succeeded') {
+      const outUrl =
+        typeof pred.output === 'string'
+          ? pred.output
+          : Array.isArray(pred.output)
+          ? pred.output.find((item) => typeof item === 'string')
+          : undefined;
+      if (!outUrl) {
+        throw new Error(`${model.label} succeeded without an output video URL`);
+      }
+      onProgress(88, `Downloading generated MP4 from ${model.label}...`);
+      const downloaded = await downloadVideoBuffer(outUrl, undefined, model.label);
+      return { ...downloaded, width, height, badgeOverride: `Rendered via ${model.label}` };
+    }
+
+    if (pred.status === 'failed' || pred.status === 'canceled') {
+      lastError = pred.error || `${model.label} prediction ${pred.status}`;
+      continue;
+    }
+
+    lastError = `${model.label} timed out`;
+  }
+
+  throw new Error(lastError);
+}
+
 async function runGradioJob(params: {
   spaceId: string;
   label: string;
@@ -905,6 +1224,8 @@ export async function generateSmartMultiEngineVideo(params: {
   siliconFlowKey?: string;
   pollinationsKey?: string;
   agnesKey?: string;
+  falKey?: string;
+  replicateToken?: string;
   onEvent: (event: HfProgressEvent) => void;
   isAborted?: () => boolean;
 }): Promise<void> {
@@ -921,6 +1242,8 @@ export async function generateSmartMultiEngineVideo(params: {
     siliconFlowKey,
     pollinationsKey,
     agnesKey,
+    falKey,
+    replicateToken,
     onEvent,
     isAborted,
   } = params;
@@ -954,6 +1277,18 @@ export async function generateSmartMultiEngineVideo(params: {
     agnesKey?.trim() ||
     process.env.VITE_AGNES_API_KEY ||
     process.env.AGNES_API_KEY ||
+    ''
+  ).trim();
+  const resolvedFalKey = (
+    falKey?.trim() ||
+    process.env.VITE_FAL_KEY ||
+    process.env.FAL_KEY ||
+    ''
+  ).trim();
+  const resolvedReplicateToken = (
+    replicateToken?.trim() ||
+    process.env.VITE_REPLICATE_API_TOKEN ||
+    process.env.REPLICATE_API_TOKEN ||
     ''
   ).trim();
   const resolvedPollinationsKey = (
@@ -1111,7 +1446,45 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 4: Google Veo 2.0 (veo-2.0-generate-001) when configured
+  // PRIORITY 4: Fal.ai Video API (Wan 2.1 / Minimax) when configured
+  if (resolvedFalKey) {
+    attempts.push({
+      badge: 'Rendered via Fal.ai Video',
+      run: () =>
+        tryFalAiVideo({
+          apiKey: resolvedFalKey,
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+  }
+
+  // PRIORITY 5: Replicate API (wan-video/wan-2.1-t2v-480p / i2v-480p) when configured
+  if (resolvedReplicateToken) {
+    attempts.push({
+      badge: 'Rendered via Replicate Wan 2.1',
+      run: () =>
+        tryReplicateVideo({
+          apiKey: resolvedReplicateToken,
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+  }
+
+  // PRIORITY 6: Google Veo 2.0 (veo-2.0-generate-001) when configured
   if (resolvedGeminiKey) {
     attempts.push({
       badge: 'Rendered via Google Veo',
@@ -1419,15 +1792,104 @@ function mapLipSyncPayload(
   return [handle_file(imageBlob), handle_file(audioBlob)];
 }
 
+async function tryReplicateLipSync(params: {
+  apiKey: string;
+  imageDataUrl: string;
+  audioDataUrl: string;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string }> {
+  const { apiKey, imageDataUrl, audioDataUrl, onProgress, isAborted } = params;
+  onProgress(52, 'Routing portrait + audio to Replicate SadTalker GPU...');
+
+  const createRes = await withTimeout(
+    fetch('https://api.replicate.com/v1/models/cjwbw/sadtalker/predictions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'wait=10',
+      },
+      body: JSON.stringify({
+        input: {
+          source_image: imageDataUrl,
+          driven_audio: audioDataUrl,
+          preprocess: 'crop',
+          still_mode: true,
+          use_enhancer: false,
+        },
+      }),
+    }),
+    12000,
+    'Replicate SadTalker submit'
+  );
+
+  if (!createRes.ok) {
+    throw new Error(`Replicate SadTalker HTTP ${createRes.status}`);
+  }
+
+  let pred = (await createRes.json()) as {
+    id?: string;
+    status?: string;
+    output?: string | string[];
+    error?: string;
+    urls?: { get?: string };
+  };
+
+  const startedAt = Date.now();
+  while (
+    (pred.status === 'starting' || pred.status === 'processing') &&
+    Date.now() - startedAt < 35000
+  ) {
+    if (isAborted?.()) throw new Error('Aborted');
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    onProgress(Math.min(84, 58 + elapsedSec), 'Syncing portrait lips via Replicate SadTalker...');
+    await new Promise((r) => setTimeout(r, 3000));
+
+    const pollUrl =
+      pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
+    if (!pollUrl || !isSafeExternalHttpsUrl(pollUrl)) break;
+
+    const pollRes = await withTimeout(
+      fetch(pollUrl, { headers: { Authorization: `Bearer ${apiKey}` } }),
+      8000,
+      'Replicate SadTalker poll'
+    );
+    if (!pollRes.ok) throw new Error(`Replicate SadTalker poll HTTP ${pollRes.status}`);
+    pred = (await pollRes.json()) as typeof pred;
+  }
+
+  if (pred.status === 'succeeded') {
+    const outUrl =
+      typeof pred.output === 'string'
+        ? pred.output
+        : Array.isArray(pred.output)
+        ? pred.output.find((item) => typeof item === 'string')
+        : undefined;
+    if (!outUrl) throw new Error('Replicate SadTalker completed without an output video URL');
+    onProgress(90, 'Downloading Lip-Sync MP4 from Replicate SadTalker...');
+    return downloadVideoBuffer(outUrl, undefined, 'Replicate SadTalker');
+  }
+
+  throw new Error(pred.error || 'Replicate SadTalker did not complete');
+}
+
 export async function generateLipSyncVideo(params: {
   imageDataUrl: string;
   audioDataUrl: string;
   hfToken?: string;
+  replicateToken?: string;
   onEvent: (event: HfProgressEvent) => void;
   isAborted?: () => boolean;
 }): Promise<void> {
-  const { imageDataUrl, audioDataUrl, hfToken, onEvent, isAborted } = params;
+  const { imageDataUrl, audioDataUrl, hfToken, replicateToken, onEvent, isAborted } = params;
   const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || '').trim();
+  const resolvedReplicateToken = (
+    replicateToken?.trim() ||
+    process.env.VITE_REPLICATE_API_TOKEN ||
+    process.env.REPLICATE_API_TOKEN ||
+    ''
+  ).trim();
 
   const imageBlob = dataUrlToBlob(imageDataUrl);
   const audioBlob = dataUrlToBlob(audioDataUrl);
@@ -1519,6 +1981,33 @@ export async function generateLipSyncVideo(params: {
       return;
     } catch (err) {
       lastReason = err instanceof Error ? err.message : 'Space unavailable';
+    }
+  }
+
+  if (resolvedReplicateToken && !isAborted?.()) {
+    try {
+      const repRes = await tryReplicateLipSync({
+        apiKey: resolvedReplicateToken,
+        imageDataUrl,
+        audioDataUrl,
+        onProgress: progressCb,
+        isAborted,
+      });
+      if (isAborted?.()) return;
+      const fileId = storeCachedHfVideo(repRes.buffer, repRes.mimeType);
+      onEvent({
+        type: 'done',
+        percent: 100,
+        message: 'Lip-synced talking video ready via Replicate SadTalker!',
+        providerLabel: 'Rendered via Replicate SadTalker',
+        videoApiPath: `/api/hf-video-file/${fileId}`,
+        mimeType: repRes.mimeType,
+        width: 512,
+        height: 512,
+      });
+      return;
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : lastReason;
     }
   }
 
