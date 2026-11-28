@@ -89,13 +89,25 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<StudioTab>('text-to-video');
   const [language, setLanguage] = useState<LanguageCode>(() => {
     try {
-      const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY) as LanguageCode | null;
-      return saved || 'en';
+      const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      if (saved === 'pa') return 'pa-IN';
+      return (saved as LanguageCode | null) || 'en';
     } catch {
       return 'en';
     }
   });
-  const [voiceLanguageId, setVoiceLanguageId] = useState<string>('en');
+  const [voiceLanguageId, setVoiceLanguageId] = useState<string>(() => {
+    try {
+      const saved = localStorage.getItem(LANGUAGE_STORAGE_KEY);
+      if (saved === 'pa') return 'pa-IN';
+      if (saved && ['en', 'ur', 'pa-IN', 'pa-PK', 'pa-FSD', 'hi', 'ar', 'ru', 'zh', 'sd', 'ta', 'te'].includes(saved)) {
+        return saved;
+      }
+      return 'en';
+    } catch {
+      return 'en';
+    }
+  });
   const [voiceAutoGenerate, setVoiceAutoGenerate] = useState<boolean>(false);
   const [voiceReadbackEnabled, setVoiceReadbackEnabled] = useState<boolean>(false);
   const { cooldownSeconds, tryAcquire } = useGenerationRateLimit();
@@ -464,6 +476,8 @@ export default function App() {
           mode,
           style: stylePreset,
           cameraMotion,
+          voiceLanguageId,
+          languageCode: language,
           geminiKey: activeGeminiKey || undefined,
           groqKey: activeGroqKey || undefined,
           openRouterKey: activeOpenRouterKey || undefined,
@@ -481,10 +495,32 @@ export default function App() {
       setPreviousPrompt(trimmed);
       setPrompt(data.enhancedPrompt);
     } catch (err) {
-      const systemInstruction =
-        mode === 'lip-sync'
-          ? 'You are an expert dialogue and spoken script writer for talking avatars. Rewrite and polish the user input into a natural, expressive spoken monologue (2-4 crisp sentences, under 75 words) in the same language. Return ONLY the final spoken script text with no quotes or markdown.'
-          : 'You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive prompt under 75 words. Return ONLY the enhanced prompt text with no quotes or markdown.';
+      const isFaisalabadi = voiceLanguageId === 'pa-FSD';
+      const isPakPunjabi = voiceLanguageId === 'pa-PK';
+      const isIndPunjabi = voiceLanguageId === 'pa-IN';
+
+      let systemInstruction: string;
+      if (isFaisalabadi) {
+        systemInstruction =
+          mode === 'lip-sync'
+            ? 'You are a witty, hilarious Faisalabadi Punjabi comedy writer. Rewrite or expand the user input into one energetic, funny Faisalabadi Punjabi spoken monologue (under 50 words) written strictly in Shahmukhi (Urdu/Arabic) script using expressions like "اوئے ہوئے!", "کی گل اے استاد!", "چس آ گئی!", "ات چُک دتی!". Return ONLY the Shahmukhi Punjabi text.'
+            : 'You are an expert cinematography director with a hilarious Faisalabadi Punjabi voice. Rewrite the user input into one vivid, funny scene prompt (under 75 words) written strictly in Shahmukhi (Urdu/Arabic) Punjabi script with lively Faisalabadi humor and expressions like "اوئے ہوئے!", "کی گل اے استاد!", "چس آ گئی!". Return ONLY the Shahmukhi Punjabi text.';
+      } else if (isPakPunjabi) {
+        systemInstruction =
+          mode === 'lip-sync'
+            ? 'You are an authentic Pakistani Punjabi dialogue writer. Rewrite the user input into a natural spoken monologue (under 50 words) written strictly in Shahmukhi Punjabi (Urdu/Arabic script). Return ONLY the script.'
+            : 'You are an expert cinematography director. Rewrite the user input into one vivid scene prompt (under 75 words) written in Shahmukhi Punjabi (Urdu/Arabic script). Return ONLY the prompt.';
+      } else if (isIndPunjabi) {
+        systemInstruction =
+          mode === 'lip-sync'
+            ? 'You are an authentic Indian Punjabi dialogue writer. Rewrite the user input into a natural spoken monologue (under 50 words) written strictly in Gurmukhi Punjabi script (ਪੰਜਾਬੀ). Return ONLY the script.'
+            : 'You are an expert cinematography director. Rewrite the user input into one vivid scene prompt (under 75 words) written in Gurmukhi Punjabi script (ਪੰਜਾਬੀ). Return ONLY the prompt.';
+      } else {
+        systemInstruction =
+          mode === 'lip-sync'
+            ? 'You are an expert dialogue and spoken script writer for talking avatars. Rewrite and polish the user input into a natural, expressive spoken monologue (2-4 crisp sentences, under 75 words) in the same language. Return ONLY the final spoken script text with no quotes or markdown.'
+            : 'You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive prompt under 75 words. Return ONLY the enhanced prompt text with no quotes or markdown.';
+      }
       const userMessage =
         mode === 'lip-sync'
           ? `Polish or expand this spoken dialogue script for a talking avatar video (${stylePreset}): "${trimmed}"`
@@ -558,12 +594,23 @@ export default function App() {
       }
 
       if (fallbackText) {
+        const hasNonLatin = /[\u0600-\u06FF\u0A00-\u0A7F]/.test(fallbackText);
         const finalEnhanced =
-          mode === 'text-to-video'
+          mode === 'text-to-video' && !hasNonLatin && !isFaisalabadi && !isPakPunjabi && !isIndPunjabi
             ? enhanceTextToVideoPromptFraming(fallbackText)
             : fallbackText;
         setPreviousPrompt(trimmed);
         setPrompt(finalEnhanced);
+        return;
+      }
+
+      if (isFaisalabadi) {
+        const fsdFallback =
+          mode === 'lip-sync'
+            ? `اوئے ہوئے استاد! کی گل اے، آج تاں چس آ گئی اے! ${trimmed} — ہس کے بولو یار، ات چُک دتی!`
+            : `اوئے ہوئے! کی گل اے استاد، سنیما سٹائل فل روشن منظر: ${trimmed} — زبردست فیصل آبادی شغل میلہ تے کمال کیمرہ، چس آ گئی!`;
+        setPreviousPrompt(trimmed);
+        setPrompt(fsdFallback);
         return;
       }
 
@@ -614,12 +661,17 @@ export default function App() {
             : p
         );
         try {
+          const isShahmukhiLipSync =
+            (activeVoice.id === 'pa-PK' ||
+              activeVoice.id === 'pa-FSD' ||
+              /[\u0600-\u06FF]/.test(trimmedDialogue)) &&
+            activeVoice.translateHintCode === 'pa';
           const ttsRes = await fetch('/api/tts-audio', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               text: trimmedDialogue,
-              languageCode: activeVoice.translateHintCode,
+              languageCode: isShahmukhiLipSync ? 'ur' : activeVoice.translateHintCode,
             }),
           });
           if (ttsRes.ok) {
@@ -1932,8 +1984,10 @@ export default function App() {
                     isGenerating={progress.active}
                     progressPercent={progress.percent}
                     togetherKey={(engineVaultKeys.togetherKey || envTogether).trim() || undefined}
+                    geminiKey={(engineVaultKeys.geminiKey || envGemini).trim() || undefined}
                     groqKey={(engineVaultKeys.groqKey || envGroq).trim() || undefined}
                     openRouterKey={(engineVaultKeys.openRouterKey || envOpenRouter).trim() || undefined}
+                    voiceLanguageId={voiceLanguageId}
                     voiceAutoGenerate={voiceAutoGenerate}
                     onVoiceAutoGenerateChange={setVoiceAutoGenerate}
                     voiceReadbackEnabled={voiceReadbackEnabled}

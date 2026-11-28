@@ -1,7 +1,9 @@
 export type LanguageCode =
   | 'en'
   | 'ur'
-  | 'pa'
+  | 'pa-IN'
+  | 'pa-PK'
+  | 'pa-FSD'
   | 'hi'
   | 'ar'
   | 'es'
@@ -27,7 +29,9 @@ export interface LanguageOption {
 export const LANGUAGES: LanguageOption[] = [
   { code: 'en', name: 'English', nativeName: 'English', speechLocale: 'en-US' },
   { code: 'ur', name: 'Urdu', nativeName: 'اردو', speechLocale: 'ur-PK', rtl: true },
-  { code: 'pa', name: 'Punjabi', nativeName: 'ਪੰਜਾਬੀ', speechLocale: 'pa-IN' },
+  { code: 'pa-IN', name: 'Gurmukhi - India', nativeName: 'ਪੰਜਾਬੀ', speechLocale: 'pa-IN' },
+  { code: 'pa-PK', name: 'Shahmukhi - Pakistan', nativeName: 'پنجابی', speechLocale: 'pa-PK', rtl: true },
+  { code: 'pa-FSD', name: 'Faisalabad Funny Punjabi', nativeName: 'فیصل آبادی پنجابی', speechLocale: 'pa-PK', rtl: true },
   { code: 'hi', name: 'Hindi', nativeName: 'हिन्दी', speechLocale: 'hi-IN' },
   { code: 'ar', name: 'Arabic', nativeName: 'العربية', speechLocale: 'ar-SA', rtl: true },
   { code: 'es', name: 'Spanish', nativeName: 'Español', speechLocale: 'es-ES' },
@@ -184,15 +188,17 @@ const TRANSLATIONS: Record<LanguageCode, Partial<UIStrings>> = {
     creationsTitle: 'میری تخلیقات',
     footerCredit: 'تیار کردہ جٹ آفیشل',
   },
-  pa: {
+  'pa-IN': {
     navTextToVideo: 'ਟੈਕਸਟ ਤੋਂ ਵੀਡੀਓ (15s ਆਟੋ)',
     navImageToVideo: 'ਤਸਵੀਰ ਤੋਂ ਵੀਡੀਓ',
+    navLipSync: 'AI ਲਿਪ-ਸਿੰਕ / ਬੋਲਦੀ ਤਸਵੀਰ',
     navTextToImage: 'ਟੈਕਸਟ ਤੋਂ ਤਸਵੀਰ',
     navMyCreations: 'ਮੇਰੀਆਂ ਰਚਨਾਵਾਂ',
     newCanvas: 'ਨਵਾਂ ਕੈਨਵਸ',
     languageLabel: 'ਭਾਸ਼ਾ',
     promptLabel: 'ਪ੍ਰੋਂਪਟ',
     magicEnhance: 'ਪ੍ਰੋਂਪਟ ਸੁਧਾਰੋ',
+    enhancing: 'ਸੁਧਾਰ ਰਿਹਾ ਹੈ...',
     aspectRatio: 'ਅਨੁਪਾਤ',
     stylePreset: 'ਸਟਾਈਲ',
     duration: 'ਸਮਾਂ',
@@ -204,11 +210,70 @@ const TRANSLATIONS: Record<LanguageCode, Partial<UIStrings>> = {
     generateVideoBtn: 'AI ਵੀਡੀਓ ਬਣਾਓ',
     generateImageBtn: 'HD ਤਸਵੀਰ ਬਣਾਓ',
     animateBtn: 'ਤਸਵੀਰ ਐਨੀਮੇਟ ਕਰੋ',
+    generateLipSyncBtn: 'ਬੋਲਦੀ ਵੀਡੀਓ ਬਣਾਓ',
     downloadVideoBtn: 'ਵੀਡੀਓ ਡਾਊਨਲੋਡ ਕਰੋ',
     downloadImageBtn: 'ਤਸਵੀਰ ਡਾਊਨਲੋਡ ਕਰੋ',
     shareBtn: 'ਸਾਂਝਾ ਕਰੋ',
     creationsTitle: 'ਮੇਰੀਆਂ ਰਚਨਾਵਾਂ',
     footerCredit: 'Jatt Official ਵੱਲੋਂ ਤਿਆਰ',
+  },
+  'pa-PK': {
+    navTextToVideo: 'ٹیکسٹ توں ویڈیو (15s آٹو)',
+    navImageToVideo: 'تصویر توں ویڈیو',
+    navLipSync: 'AI لپ سنک / بولدی تصویر',
+    navTextToImage: 'ٹیکسٹ توں تصویر',
+    navMyCreations: 'میریاں تخلیقاں',
+    newCanvas: 'نواں کینوس',
+    languageLabel: 'بولی',
+    promptLabel: 'پرامپٹ',
+    magicEnhance: 'پرامپٹ ودھیا بناؤ',
+    enhancing: 'ودھیا بن رہیا اے...',
+    aspectRatio: 'اسپیکٹ ریشو',
+    stylePreset: 'اسٹائیل',
+    duration: 'ویلا',
+    renderQuality: 'کوالٹی',
+    cameraMotion: 'کیمرا موشن',
+    voiceoverLabel: 'AI وائس اوور',
+    musicLabel: 'بیک گراؤنڈ میوزک',
+    musicUpload: 'آڈیو اپ لوڈ کرو',
+    generateVideoBtn: 'AI ویڈیو بناؤ',
+    generateImageBtn: 'HD تصویر بناؤ',
+    animateBtn: 'تصویر نوں ویڈیو بناؤ',
+    generateLipSyncBtn: 'بولدی ہوئی ویڈیو بناؤ',
+    downloadVideoBtn: 'ویڈیو ڈاؤن لوڈ کرو',
+    downloadImageBtn: 'تصویر ڈاؤن لوڈ کرو',
+    shareBtn: 'شیئر کرو',
+    creationsTitle: 'میریاں تخلیقاں',
+    footerCredit: 'تیار کیتا جٹ آفیشل نے',
+  },
+  'pa-FSD': {
+    navTextToVideo: 'لکھ کے ویڈیو بناؤ استاد (15s)',
+    navImageToVideo: 'فوٹو نوں نچاؤ (Image to Video)',
+    navLipSync: 'فوٹو توں جگتاں تے گانے بلواؤ',
+    navTextToImage: 'لکھ کے چس والی فوٹو کڈھو',
+    navMyCreations: 'ساڈے شاہکار',
+    newCanvas: 'نواں کھاتہ کھولو',
+    languageLabel: 'بولی (فیصل آبادی)',
+    promptLabel: 'سین دسو استاد جی (Prompt)',
+    magicEnhance: 'ات چُک تڑکا لاؤ (Magic Enhance)',
+    enhancing: 'چس پا رہے آں...',
+    aspectRatio: 'فریم دا ناپ',
+    stylePreset: 'چسکا اسٹائیل',
+    duration: 'کِنے سیکنڈ',
+    renderQuality: 'ایچ ڈی کوالٹی',
+    cameraMotion: 'کیمرا گھماؤ',
+    voiceoverLabel: 'مست AI آواز',
+    musicLabel: 'بیک گراؤنڈ ڈھول / میوزک',
+    musicUpload: 'گانا یا آواز پاؤ',
+    generateVideoBtn: 'اوئے ہوئے! ویڈیو کڈھو استاد',
+    generateImageBtn: 'چس والی HD فوٹو بناؤ',
+    animateBtn: 'تصویر نوں زندہ کر دیو',
+    generateLipSyncBtn: 'اوئے ہوئے! فوٹو بلواؤ استاد',
+    downloadVideoBtn: 'ویڈیو پکی ڈاؤن لوڈ کرو',
+    downloadImageBtn: 'فوٹو سانبھ لو',
+    shareBtn: 'یاراں نال ونڈو',
+    creationsTitle: 'ساڈے بنائے شاہکار',
+    footerCredit: 'فیصل آبادی تڑکا · جٹ آفیشل',
   },
   hi: {
     navTextToVideo: 'टेक्स्ट से वीडियो (15s ऑटो)',
@@ -547,13 +612,20 @@ const TRANSLATIONS: Record<LanguageCode, Partial<UIStrings>> = {
   },
 };
 
+function normalizeLanguageCode(code: string): LanguageCode {
+  if (code === 'pa') return 'pa-IN';
+  return code as LanguageCode;
+}
+
 export function getUIStrings(code: LanguageCode): UIStrings {
+  const normalized = normalizeLanguageCode(code);
   return {
     ...EN,
-    ...(TRANSLATIONS[code] ?? {}),
+    ...(TRANSLATIONS[normalized] ?? {}),
   };
 }
 
 export function getLanguageMeta(code: LanguageCode): LanguageOption {
-  return LANGUAGES.find((l) => l.code === code) ?? LANGUAGES[0];
+  const normalized = normalizeLanguageCode(code);
+  return LANGUAGES.find((l) => l.code === normalized) ?? LANGUAGES[0];
 }

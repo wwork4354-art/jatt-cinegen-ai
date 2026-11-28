@@ -17,7 +17,7 @@ import {
   compressAudioPayloadIfNeeded,
   compressImageDataUrl,
 } from './payloadCompressor';
-import { VOICE_LANGUAGES } from './voiceLanguages';
+import { getVoiceLanguageById } from './voiceLanguages';
 
 export interface CharacterVoiceResult {
   wavBlob: Blob;
@@ -163,8 +163,13 @@ export async function synthesizeCharacterVoiceAudio(
   text: string,
   character: FilmCharacter
 ): Promise<CharacterVoiceResult> {
-  const langMeta =
-    VOICE_LANGUAGES.find((l) => l.id === character.languageId) ?? VOICE_LANGUAGES[0];
+  const langMeta = getVoiceLanguageById(character.languageId);
+  const hasShahmukhiScript = /[\u0600-\u06FF]/.test(text);
+  const ttsLangCode =
+    (langMeta.id === 'pa-PK' || langMeta.id === 'pa-FSD' || hasShahmukhiScript) &&
+    langMeta.translateHintCode === 'pa'
+      ? 'ur'
+      : langMeta.translateHintCode || 'en';
 
   let decodedSource: AudioBuffer | null = null;
   const tempCtx = new AudioContext();
@@ -175,7 +180,7 @@ export async function synthesizeCharacterVoiceAudio(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: text.trim(),
-        languageCode: langMeta.translateHintCode || 'en',
+        languageCode: ttsLangCode,
       }),
     });
 

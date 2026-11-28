@@ -42,7 +42,17 @@ const CONFIRMATIONS_BY_LANG: Record<string, LocalizedVoiceConfirmations> = {
     generationError: 'کوئی مسئلہ پیش آ گیا، براہ کرم دوبارہ کوشش کریں۔',
     filmListeningStart: 'اس کردار کا مکالمہ اب بولیں۔',
   },
-  pa: {
+  'pa-IN': {
+    listeningStart: 'ਹੁਣ ਬੋਲੋ, ਮੈਂ ਸੁਣ ਰਿਹਾ ਹਾਂ।',
+    promptEnhanced: 'ਤੁਹਾਡੀ ਆਵਾਜ਼ ਤੋਂ ਪੂਰਾ ਸੀਨ ਤਿਆਰ ਹੋ ਗਿਆ ਹੈ।',
+    autoGeneratingIn2s: 'ਦੋ ਸਕਿੰਟਾਂ ਵਿੱਚ ਵੀਡੀਓ ਬਣਨੀ ਸ਼ੁਰੂ ਹੋ ਜਾਵੇਗੀ।',
+    autoGenCancelled: 'ਆਟੋ ਜਨਰੇਟ ਰੋਕ ਦਿੱਤਾ ਗਿਆ ਹੈ।',
+    generationStarted: 'ਤੁਹਾਡੀ ਵੀਡੀਓ ਤਿਆਰ ਹੋ ਰਹੀ ਹੈ, ਕਿਰਪਾ ਕਰਕੇ ਉਡੀਕ ਕਰੋ।',
+    generationSuccess: 'ਤੁਹਾਡੀ ਵੀਡੀਓ ਹੁਣ ਤਿਆਰ ਹੈ।',
+    generationError: 'ਕੋਈ ਸਮੱਸਿਆ ਆ ਗਈ ਹੈ, ਕਿਰਪਾ ਕਰਕੇ ਦੁਬਾਰਾ ਕੋਸ਼ਿਸ਼ ਕਰੋ।',
+    filmListeningStart: 'ਇਸ ਕਿਰਦਾਰ ਦਾ ਡਾਇਲਾਗ ਹੁਣ ਬੋਲੋ।',
+  },
+  'pa-PK': {
     listeningStart: 'ہن بولو، میں سن رہیا ہاں۔',
     promptEnhanced: 'تہاڈی آواز نال مکمل سین تیار ہو گیا اے۔',
     autoGeneratingIn2s: 'دو سیکنڈ وچ ویڈیو بننی شروع ہو جاوے گی۔',
@@ -51,6 +61,16 @@ const CONFIRMATIONS_BY_LANG: Record<string, LocalizedVoiceConfirmations> = {
     generationSuccess: 'تہاڈی ویڈیو تیار ہو گئی اے۔',
     generationError: 'کوئی مسئلہ آ گیا اے، دوبارہ کوشش کرو۔',
     filmListeningStart: 'اس کردار دا ڈائیلاگ ہن بولو۔',
+  },
+  'pa-FSD': {
+    listeningStart: 'اوئے ہوئے! ہن بولو استاد جی، مائیک آن اے، چس کرا دیو!',
+    promptEnhanced: 'واہ استاد! تہاڈی آواز نال ات چُک سین تیار ہو گیا اے، مزہ آ جاوے گا!',
+    autoGeneratingIn2s: 'تیار ہو جاؤ استاد، دو سیکنڈ وچ ویڈیو پٹاخے وانگوں بنن لگ پئی اے!',
+    autoGenCancelled: 'بریک لگ گئی استاد جی، آرام نال چیک کر لو۔',
+    generationStarted: 'اوئے ہوئے، ویڈیو بنن لگی اے استاد، ذرا ساہ کڈھ کے بیٹھو!',
+    generationSuccess: 'لو جی استاد! چس آ گئی، تہاڈی ویڈیو پکی تیار ہو گئی اے!',
+    generationError: 'اوئے یار، تھوڑا رولا پے گیا اے، دوبارہ ٹرائی مارو استاد!',
+    filmListeningStart: 'ایس کردار دا تگڑا جیا ڈائیلاگ بولو استاد، شغل لگے گا!',
   },
   sd: {
     listeningStart: 'هاڻي ڳالهايو، آئون ٻڌي رهيو آهيان.',
@@ -138,7 +158,8 @@ export function getVoiceConfirmationText(
   voiceLanguageId: string,
   key: VoicePromptPhraseKey
 ): string {
-  const table = CONFIRMATIONS_BY_LANG[voiceLanguageId] ?? CONFIRMATIONS_BY_LANG.en;
+  const normalized = voiceLanguageId === 'pa' ? 'pa-IN' : voiceLanguageId;
+  const table = CONFIRMATIONS_BY_LANG[normalized] ?? CONFIRMATIONS_BY_LANG.en;
   return table[key];
 }
 
@@ -216,12 +237,18 @@ export async function speakVoiceConfirmation(
   }
 
   try {
+    const hasShahmukhiScript = /[\u0600-\u06FF]/.test(text);
+    const resolvedTtsLang =
+      (voiceLang.id === 'pa-PK' || voiceLang.id === 'pa-FSD' || hasShahmukhiScript) &&
+      voiceLang.translateHintCode === 'pa'
+        ? 'ur'
+        : voiceLang.translateHintCode;
     const res = await fetch('/api/tts-audio', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         text: text.slice(0, 260),
-        languageCode: voiceLang.translateHintCode,
+        languageCode: resolvedTtsLang,
       }),
     });
     if (token !== speakGenerationToken) return;

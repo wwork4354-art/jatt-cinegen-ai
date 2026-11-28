@@ -66,8 +66,10 @@ interface FilmDirectorPanelProps {
   progressPercent: number;
   togetherKey?: string;
   pollinationsKey?: string;
+  geminiKey?: string;
   groqKey?: string;
   openRouterKey?: string;
+  voiceLanguageId?: string;
   voiceAutoGenerate: boolean;
   onVoiceAutoGenerateChange: (enabled: boolean) => void;
   voiceReadbackEnabled: boolean;
@@ -116,34 +118,98 @@ const FILM_PRESETS: Array<{
     ],
   },
   {
-    label: 'Punjabi Comedy Banter',
+    label: 'Punjabi Comedy (Shahmukhi PK)',
     setting: 'Sunny golden mustard fields beside a vibrant Pakistani village courtyard',
     characters: [
       {
-        name: 'Jatt Singh',
+        name: 'Jatt Saab',
         appearancePrompt: 'cheerful bearded man with classic turban and crisp waistcoat',
         gender: 'male',
         ageTone: 'adult',
-        languageId: 'pa',
+        languageId: 'pa-PK',
       },
       {
         name: 'Billa',
         appearancePrompt: 'energetic young sidekick in denim vest smiling broadly',
         gender: 'male',
         ageTone: 'young',
-        languageId: 'pa',
+        languageId: 'pa-PK',
       },
     ],
     shots: [
       {
         speakerIdx: 0,
         dialogue: 'او بیلیا، اج ٹریکٹر دی چابی کتھے چھپا دتی توں؟',
-        action: 'Jatt Singh asks smiling playfully',
+        action: 'Jatt Saab asks smiling playfully',
       },
       {
         speakerIdx: 1,
         dialogue: 'بھائی جان، چابی تاں چاء دے کپ کول ای پئی سی!',
         action: 'Billa laughs and responds quickly',
+      },
+    ],
+  },
+  {
+    label: 'Faisalabadi Funny (فیصل آبادی)',
+    setting: 'Busy colorful Faisalabad Clock Tower bazaar tea corner at golden sunset',
+    characters: [
+      {
+        name: 'Ustad Jeera',
+        appearancePrompt: 'witty cheerful Punjabi uncle with curled mustache and vibrant kurta',
+        gender: 'male',
+        ageTone: 'adult',
+        languageId: 'pa-FSD',
+      },
+      {
+        name: 'Chacha Lassi',
+        appearancePrompt: 'hilarious expressive friend wearing sunglasses and colorful vest',
+        gender: 'male',
+        ageTone: 'elder',
+        languageId: 'pa-FSD',
+      },
+    ],
+    shots: [
+      {
+        speakerIdx: 0,
+        dialogue: 'اوئے ہوئے! کی گل اے استاد، آج تاں گھنٹہ گھر کول وی تیری جگت دی چس آ گئی اے!',
+        action: 'Ustad Jeera grins and waves hands with comedic energy',
+      },
+      {
+        speakerIdx: 1,
+        dialogue: 'ات چُک دتی یارا! گرما گرم سموسے کھا تے فیصل آبادی شغل میلہ شروع کر!',
+        action: 'Chacha Lassi laughs loudly and points playfully',
+      },
+    ],
+  },
+  {
+    label: 'Punjabi Drama (Gurmukhi IN)',
+    setting: 'Golden wheat fields in rural Punjab with warm morning sunlight',
+    characters: [
+      {
+        name: 'Harpreet',
+        appearancePrompt: 'proud smiling young man in neat royal blue turban and jacket',
+        gender: 'male',
+        ageTone: 'adult',
+        languageId: 'pa-IN',
+      },
+      {
+        name: 'Simran',
+        appearancePrompt: 'graceful woman in bright phulkari dupatta smiling warmly',
+        gender: 'female',
+        ageTone: 'adult',
+        languageId: 'pa-IN',
+      },
+    ],
+    shots: [
+      {
+        speakerIdx: 0,
+        dialogue: 'ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ਜੀ! ਅੱਜ ਖੇਤਾਂ ਵਿੱਚ ਬੜੀ ਸੋਹਣੀ ਹਵਾ ਚੱਲ ਰਹੀ ਹੈ।',
+        action: 'Harpreet smiles warmly facing camera',
+      },
+      {
+        speakerIdx: 1,
+        dialogue: 'ਹਾਂਜੀ ਬਿਲਕੁਲ! ਅੱਜ ਦਾ ਦਿਨ ਸਾਡੇ ਸਭ ਲਈ ਖੁਸ਼ੀਆਂ ਲੈ ਕੇ ਆਇਆ ਹੈ।',
+        action: 'Simran replies joyfully with expressive gaze',
       },
     ],
   },
@@ -203,8 +269,10 @@ export function FilmDirectorPanel({
   isGenerating,
   progressPercent,
   togetherKey,
+  geminiKey,
   groqKey,
   openRouterKey,
+  voiceLanguageId,
   voiceAutoGenerate,
   onVoiceAutoGenerateChange,
   voiceReadbackEnabled,
@@ -214,6 +282,7 @@ export function FilmDirectorPanel({
   onRenderFilm,
 }: FilmDirectorPanelProps) {
   const [generatingPortraitFor, setGeneratingPortraitFor] = useState<string | null>(null);
+  const [isGeneratingDialogue, setIsGeneratingDialogue] = useState(false);
   const fileInputsRef = useRef<Record<string, HTMLInputElement | null>>({});
 
   // Voice-First Dialogue Dictation State
@@ -299,7 +368,10 @@ export function FilmDirectorPanel({
 
     setIsProcessingVoice(true);
     setFilmVoiceNote(`Polishing dialogue line for ${targetSpeaker?.name || 'Actor'}...`);
-    let finalDialogue = cleanSpoken;
+    let finalDialogue =
+      langId === 'pa-FSD'
+        ? `اوئے ہوئے! کی گل اے استاد، ${cleanSpoken} — چس آ گئی!`
+        : cleanSpoken;
 
     try {
       const res = await fetch('/api/enhance-prompt', {
@@ -308,6 +380,8 @@ export function FilmDirectorPanel({
         body: JSON.stringify({
           prompt: cleanSpoken,
           mode: 'lip-sync',
+          voiceLanguageId: langId,
+          geminiKey: geminiKey?.trim() || undefined,
           groqKey: groqKey?.trim() || undefined,
           openRouterKey: openRouterKey?.trim() || undefined,
           togetherKey: togetherKey?.trim() || undefined,
@@ -320,7 +394,7 @@ export function FilmDirectorPanel({
         }
       }
     } catch {
-      // Keep clean spoken text if offline
+      // Keep clean spoken text (or Faisalabadi flavor if pa-FSD)
     }
 
     const updatedShots = currentShots.map((s) =>
@@ -565,10 +639,112 @@ export function FilmDirectorPanel({
       portraitDataUrl: null,
       gender: index % 2 === 0 ? 'female' : 'male',
       ageTone: 'adult',
-      languageId: 'en',
+      languageId: voiceLanguageId || 'en',
       seed: deriveSeedFromText(`${name}-${Date.now()}`),
     };
     onChangeCharacters([...characters, newChar]);
+  };
+
+  const handleAiGenerateDialogue = async () => {
+    if (isGeneratingDialogue || isGenerating || characters.length === 0) return;
+    setIsGeneratingDialogue(true);
+    setFilmVoiceError(null);
+
+    const effectiveStyleLang =
+      voiceLanguageId === 'pa-FSD' || characters.some((c) => c.languageId === 'pa-FSD')
+        ? 'pa-FSD'
+        : resolvedSpeaker?.languageId || voiceLanguageId || 'en';
+
+    setFilmVoiceNote(
+      effectiveStyleLang === 'pa-FSD'
+        ? 'Generating funny Faisalabadi Punjabi jugat dialogue...'
+        : 'Generating AI multi-character dialogue...'
+    );
+
+    try {
+      const res = await fetch('/api/generate-dialogue', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sceneSetting,
+          voiceLanguageId: effectiveStyleLang,
+          characters: characters.map((c) => ({
+            name: c.name,
+            gender: c.gender,
+            ageTone: c.ageTone,
+            languageId: voiceLanguageId === 'pa-FSD' ? 'pa-FSD' : c.languageId,
+          })),
+          geminiKey: geminiKey?.trim() || undefined,
+          groqKey: groqKey?.trim() || undefined,
+          openRouterKey: openRouterKey?.trim() || undefined,
+          togetherKey: togetherKey?.trim() || undefined,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      const data = (await res.json()) as {
+        lines?: Array<{ speakerName: string; dialogue: string; sceneAction: string }>;
+      };
+      if (Array.isArray(data.lines) && data.lines.length > 0) {
+        const nextShots: FilmDialogueShot[] = data.lines.map((line, idx) => {
+          const matchedChar =
+            characters.find(
+              (c) => c.name.trim().toLowerCase() === (line.speakerName || '').trim().toLowerCase()
+            ) ?? characters[idx % characters.length];
+          return {
+            id: `shot-${Date.now()}-${idx}`,
+            characterId: matchedChar.id,
+            dialogue: sanitizeUserText(line.dialogue),
+            sceneAction: sanitizeUserText(line.sceneAction || `${matchedChar.name} speaks expressively`),
+          };
+        });
+        onChangeShots(nextShots);
+        setActiveShotId(nextShots[0]?.id ?? '');
+        setFilmVoiceNote(
+          effectiveStyleLang === 'pa-FSD'
+            ? 'چس آ گئی! Funny Faisalabadi Punjabi dialogue generated.'
+            : 'AI dialogue script ready.'
+        );
+        if (voiceReadbackEnabled) {
+          void speakVoiceConfirmation(effectiveStyleLang, 'promptEnhanced');
+        }
+        return;
+      }
+      throw new Error('Empty lines');
+    } catch {
+      const c1 = characters[0];
+      const c2 = characters[1] ?? c1;
+      const fallbackShots: FilmDialogueShot[] =
+        effectiveStyleLang === 'pa-FSD'
+          ? [
+              {
+                id: `shot-${Date.now()}-0`,
+                characterId: c1.id,
+                dialogue: `اوئے ہوئے ${c2.name}! کی گل اے استاد، اج تاں گھنٹہ گھر کول وی تیری جگتاں دی چس آ گئی اے!`,
+                sceneAction: `${c1.name} laughs with energetic Faisalabadi flair`,
+              },
+              {
+                id: `shot-${Date.now()}-1`,
+                characterId: c2.id,
+                dialogue: 'چس آ گئی استاد جی! ساڈے نال شغل لاؤ تے ہاسے ات چُک دین گے، واہ بھئی واہ!',
+                sceneAction: `${c2.name} responds playfully with broad smile`,
+              },
+            ]
+          : characters.slice(0, 2).map((c, idx) => ({
+              id: `shot-${Date.now()}-${idx}`,
+              characterId: c.id,
+              dialogue:
+                idx === 0
+                  ? `Let us make this scene unforgettable, ${c2.name}.`
+                  : `Right behind you, ${c1.name} — camera is rolling!`,
+              sceneAction: `${c.name} speaks expressively on camera`,
+            }));
+      onChangeShots(fallbackShots);
+      setFilmVoiceNote('Dialogue script generated.');
+    } finally {
+      setIsGeneratingDialogue(false);
+    }
   };
 
   const handleUpdateCharacter = (id: string, patch: Partial<FilmCharacter>) => {
@@ -988,18 +1164,39 @@ export function FilmDirectorPanel({
 
       {/* Dialogue Shot Timeline */}
       <div className="space-y-2.5">
-        <div className="flex items-center justify-between">
+        <div className="flex flex-wrap items-center justify-between gap-2">
           <span className="text-xs font-medium text-slate-300">
             Dialogue Shots ({shots.length})
           </span>
-          <button
-            type="button"
-            onClick={handleAddShot}
-            className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            Add Line
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleAiGenerateDialogue}
+              disabled={isGeneratingDialogue || isGenerating}
+              className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-indigo-400/40 bg-indigo-400/15 px-2.5 py-1 text-[11px] font-semibold text-indigo-200 hover:bg-indigo-400/25 disabled:opacity-50"
+            >
+              {isGeneratingDialogue ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <Sparkles className="h-3.5 w-3.5" />
+              )}
+              <span>
+                {isGeneratingDialogue
+                  ? 'Writing...'
+                  : voiceLanguageId === 'pa-FSD' || characters.some((c) => c.languageId === 'pa-FSD')
+                  ? 'AI Faisalabadi Dialogue'
+                  : 'AI Generate Dialogue'}
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={handleAddShot}
+              className="inline-flex min-h-[32px] items-center gap-1 rounded-lg border border-cyan-400/35 bg-cyan-400/10 px-2.5 py-1 text-[11px] font-semibold text-cyan-200 hover:bg-cyan-400/20"
+            >
+              <Plus className="h-3.5 w-3.5" />
+              Add Line
+            </button>
+          </div>
         </div>
 
         <div className="space-y-2.5 max-h-[280px] overflow-y-auto pr-1">

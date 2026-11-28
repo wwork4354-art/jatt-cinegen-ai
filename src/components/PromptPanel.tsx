@@ -174,7 +174,7 @@ const SAMPLE_PROMPTS: Record<
   ],
   'lip-sync': [
     'Welcome to Jatt CineGen AI! Today we are turning any still photo into a living talking video.',
-    'Assalam-o-Alaikum dosto! Aaj hum AI ke zariye apni tasveer ko bolti aur gaati hui video bana rahe hain.',
+    'اوئے ہوئے استاد! آج تاں چس آ گئی اے، ساڈی فوٹو وی ہس ہس کے بول پئی!',
     'Sat Sri Akal saareyan nu! Ajj assi AI naal apni photo nu bolan wali video vich badal rahe haan.',
   ],
 };
@@ -303,16 +303,19 @@ export function PromptPanel({
   }>({ checking: false });
 
   useEffect(() => {
-    if (language === 'ur') onVoiceLanguageChange('ur');
-    else if (language === 'pa') onVoiceLanguageChange('pa');
-    else if (language === 'hi') onVoiceLanguageChange('hi');
-    else if (language === 'ar') onVoiceLanguageChange('ar');
-    else if (language === 'ru') onVoiceLanguageChange('ru');
-    else if (language === 'zh') onVoiceLanguageChange('zh');
-    else if (language === 'sd') onVoiceLanguageChange('sd');
-    else if (language === 'ta') onVoiceLanguageChange('ta');
-    else if (language === 'te') onVoiceLanguageChange('te');
-    else if (language === 'en') onVoiceLanguageChange('en');
+    const raw = language as string;
+    if (raw === 'ur') onVoiceLanguageChange('ur');
+    else if (raw === 'pa-IN' || raw === 'pa') onVoiceLanguageChange('pa-IN');
+    else if (raw === 'pa-PK') onVoiceLanguageChange('pa-PK');
+    else if (raw === 'pa-FSD') onVoiceLanguageChange('pa-FSD');
+    else if (raw === 'hi') onVoiceLanguageChange('hi');
+    else if (raw === 'ar') onVoiceLanguageChange('ar');
+    else if (raw === 'ru') onVoiceLanguageChange('ru');
+    else if (raw === 'zh') onVoiceLanguageChange('zh');
+    else if (raw === 'sd') onVoiceLanguageChange('sd');
+    else if (raw === 'ta') onVoiceLanguageChange('ta');
+    else if (raw === 'te') onVoiceLanguageChange('te');
+    else if (raw === 'en') onVoiceLanguageChange('en');
   }, [language, onVoiceLanguageChange]);
 
   const clearAutoGenerateCountdown = () => {
@@ -357,6 +360,11 @@ export function PromptPanel({
   const enrichSpokenPromptFallback = (spoken: string): string => {
     const clean = spoken.trim();
     if (!clean) return '';
+    if (voiceLanguageId === 'pa-FSD') {
+      return mode === 'lip-sync'
+        ? `اوئے ہوئے! کی گل اے استاد، آج تاں چس آ گئی اے! ${clean} — ات چُک دیو یار!`
+        : `اوئے ہوئے استاد! چس آ گئی — ${clean}، زبردست فیصل آبادی شغل میلہ، چمکدار سنیما لائٹنگ تے کمال فریم!`;
+    }
     if (mode === 'lip-sync') return clean;
     const styleDesc =
       stylePreset === 'anime'
@@ -395,6 +403,8 @@ export function PromptPanel({
           mode,
           style: stylePreset,
           cameraMotion,
+          voiceLanguageId,
+          languageCode: language,
           groqKey: groqKey.trim() || undefined,
           openRouterKey: openRouterKey.trim() || undefined,
           togetherKey: togetherKey.trim() || undefined,
@@ -851,7 +861,7 @@ export function PromptPanel({
     mode === 'text-to-image'
       ? 'Generate Full HD images via Together AI (FLUX.1-schnell-Free) or 100% free Pollinations AI.'
       : mode === 'lip-sync'
-      ? 'Upload any Portrait Photo + Song or typed dialogue in 17 languages — synced via Hugging Face & Replicate SadTalker GPUs with instant Animator backup.'
+      ? 'Upload any Portrait Photo + Song or typed dialogue in 19 languages & Punjabi dialects — synced via Hugging Face & Replicate SadTalker GPUs with instant Animator backup.'
       : mode === 'text-to-video'
       ? 'Generates real character & object motion via Wan 2.1, Fal.ai, Replicate, Agnes AI & CogVideoX APIs (falls back to animated Pollinations only if APIs fail).'
       : 'Upload any reference photo and animate real character & scene motion via Wan 2.1 I2V, Fal.ai, Replicate, Google Veo & LTX-Video.';
@@ -1047,7 +1057,7 @@ export function PromptPanel({
               }`}
             >
               <Volume2 className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">Type Speech (17 Languages)</span>
+              <span className="truncate">Type Speech (19 Languages)</span>
             </button>
           </div>
 
@@ -1211,7 +1221,7 @@ export function PromptPanel({
             htmlFor="studio-prompt"
             className="text-xs font-semibold tracking-wide text-slate-300"
           >
-            {isLipSyncMode ? 'Dialogue / Speech Script (17 Languages AI Voice)' : strings.promptLabel}
+            {isLipSyncMode ? 'Dialogue / Speech Script (19 Languages AI Voice)' : strings.promptLabel}
           </label>
           <div className="flex items-center gap-2">
             {previousPrompt && (

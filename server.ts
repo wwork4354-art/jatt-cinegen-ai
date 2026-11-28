@@ -277,6 +277,7 @@ async function startServer() {
   app.use(
     [
       '/api/enhance-prompt',
+      '/api/generate-dialogue',
       '/api/translate-prompt',
       '/api/transcribe-audio',
       '/api/expand-scenes',
@@ -290,17 +291,29 @@ async function startServer() {
   // 1. Magic Enhance Prompt using Gemini -> Groq (llama-3.3-70b-versatile) -> OpenRouter (free models) -> Together AI
   app.post('/api/enhance-prompt', async (req, res) => {
     try {
-      const { prompt, mode, style, cameraMotion, geminiKey, groqKey, openRouterKey, togetherKey } =
-        req.body as {
-          prompt?: string;
-          mode?: StudioMode | 'lip-sync';
-          style?: StylePreset;
-          cameraMotion?: string;
-          geminiKey?: string;
-          groqKey?: string;
-          openRouterKey?: string;
-          togetherKey?: string;
-        };
+      const {
+        prompt,
+        mode,
+        style,
+        cameraMotion,
+        voiceLanguageId,
+        languageCode,
+        geminiKey,
+        groqKey,
+        openRouterKey,
+        togetherKey,
+      } = req.body as {
+        prompt?: string;
+        mode?: StudioMode | 'lip-sync';
+        style?: StylePreset;
+        cameraMotion?: string;
+        voiceLanguageId?: string;
+        languageCode?: string;
+        geminiKey?: string;
+        groqKey?: string;
+        openRouterKey?: string;
+        togetherKey?: string;
+      };
 
       const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
       if (!promptCheck.safe) {
@@ -312,6 +325,11 @@ async function startServer() {
         res.status(400).json({ error: 'Please enter a starting idea before enhancing.' });
         return;
       }
+
+      const effectiveLang = (voiceLanguageId || languageCode || '').trim();
+      const isFaisalabadi = effectiveLang === 'pa-FSD';
+      const isPakPunjabi = effectiveLang === 'pa-PK';
+      const isIndPunjabi = effectiveLang === 'pa-IN' || effectiveLang === 'pa';
 
       const isLipSync = mode === 'lip-sync';
       const targetFormat = isLipSync
@@ -330,15 +348,34 @@ async function startServer() {
 
       const characterFramingRule =
         !isLipSync &&
+        !isFaisalabadi &&
+        !isPakPunjabi &&
+        !isIndPunjabi &&
         mode !== 'text-to-image' &&
         detectPersonOrCharacter(cleanPrompt) &&
         !isCloseUpRequested(cleanPrompt)
           ? ' Because the scene includes a person or character without a close-up request, include full-body framing from head to toe, wide angle, front-facing view, clear detailed face, and both arms and hands clearly visible.'
           : '';
 
-      const systemPrompt = isLipSync
-        ? 'You are a script and dialogue writer. Rewrite or expand the user input into one natural, expressive spoken script or short song verse under 45 words in the same language as the input. Return ONLY the script text with no quotes or markdown.'
-        : `You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive, production-ready prompt under 75 words. Focus on concrete visual subjects, lighting, atmosphere, lens/texture details, and natural motion when video is requested.${characterFramingRule} Return ONLY the enhanced prompt text with no quotes, no preamble, and no markdown.`;
+      let systemPrompt: string;
+      if (isFaisalabadi) {
+        systemPrompt = isLipSync
+          ? 'You are a witty, hilarious Faisalabadi Punjabi comedy writer. Rewrite or expand the user input into one energetic, funny Faisalabadi Punjabi spoken dialogue or playful jugat monologue (under 50 words) written strictly in authentic Shahmukhi (Urdu/Arabic) script. Naturally weave authentic Faisalabadi slang and energetic expressions like "اوئے ہوئے!", "کی گل اے استاد!", "چس آ گئی!", "ات چُک دتی!", "شغل میلہ". Keep humor clean and joyful. Return ONLY the Shahmukhi Punjabi text with no quotes or markdown.'
+          : 'You are an expert cinematography director with a hilarious, energetic Faisalabadi Punjabi voice. Rewrite the user input into one vivid, funny, upbeat visual scene prompt (under 75 words) written strictly in Shahmukhi (Urdu/Arabic) Punjabi script, describing rich visual details, lighting, and action with lively Faisalabadi comedy flair and expressions like "اوئے ہوئے!", "کی گل اے استاد!", "چس آ گئی!". Return ONLY the Shahmukhi Punjabi text with no quotes, no preamble, and no markdown.';
+      } else if (isPakPunjabi) {
+        systemPrompt = isLipSync
+          ? 'You are an authentic Pakistani Punjabi script and dialogue writer. Rewrite or expand the user input into one natural, expressive spoken dialogue or short verse under 45 words written strictly in Shahmukhi Punjabi (Urdu/Arabic script). Return ONLY the script text with no quotes or markdown.'
+          : 'You are an expert cinematography director. Rewrite the user input into one vivid, cohesive visual scene prompt under 75 words written in Shahmukhi Punjabi (Urdu/Arabic script) focusing on concrete subjects, lighting, and natural motion. Return ONLY the Shahmukhi Punjabi prompt with no quotes or markdown.';
+      } else if (isIndPunjabi) {
+        systemPrompt = isLipSync
+          ? 'You are an authentic Indian Punjabi script and dialogue writer. Rewrite or expand the user input into one natural, expressive spoken dialogue or short verse under 45 words written strictly in Gurmukhi Punjabi script (ਪੰਜਾਬੀ). Return ONLY the script text with no quotes or markdown.'
+          : 'You are an expert cinematography director. Rewrite the user input into one vivid, cohesive visual scene prompt under 75 words written in Gurmukhi Punjabi script (ਪੰਜਾਬੀ) focusing on concrete subjects, lighting, and natural motion. Return ONLY the Gurmukhi Punjabi prompt with no quotes or markdown.';
+      } else {
+        systemPrompt = isLipSync
+          ? 'You are a script and dialogue writer. Rewrite or expand the user input into one natural, expressive spoken script or short song verse under 45 words in the same language as the input. Return ONLY the script text with no quotes or markdown.'
+          : `You are an expert cinematography and visual prompt director. Rewrite the user input into one vivid, cohesive, production-ready prompt under 75 words. Focus on concrete visual subjects, lighting, atmosphere, lens/texture details, and natural motion when video is requested.${characterFramingRule} Return ONLY the enhanced prompt text with no quotes, no preamble, and no markdown.`;
+      }
+
       const userPrompt = `Enhance this creative prompt for ${targetFormat}: "${cleanPrompt}". ${styleHint} ${cameraHint}`.trim();
 
       const resolvedGroqKey = (
@@ -385,7 +422,7 @@ async function startServer() {
             systemPrompt,
             userPrompt,
             maxTokens: 180,
-            temperature: 0.7,
+            temperature: isFaisalabadi ? 0.85 : 0.7,
           });
         } catch (err) {
           lastError = err;
@@ -399,7 +436,7 @@ async function startServer() {
             systemPrompt,
             userPrompt,
             maxTokens: 180,
-            temperature: 0.7,
+            temperature: isFaisalabadi ? 0.85 : 0.7,
           });
         } catch (err) {
           lastError = err;
@@ -413,11 +450,17 @@ async function startServer() {
             systemPrompt,
             userPrompt,
             maxTokens: 180,
-            temperature: 0.7,
+            temperature: isFaisalabadi ? 0.85 : 0.7,
           });
         } catch (err) {
           lastError = err;
         }
+      }
+
+      if (!enhancedPrompt && isFaisalabadi) {
+        enhancedPrompt = isLipSync
+          ? `اوئے ہوئے استاد! کی گل اے، آج تاں چس آ گئی اے! ${cleanPrompt} — ہس کے بولو یار، سارا فیصل آباد جھوم اٹھے!`
+          : `اوئے ہوئے! کی گل اے استاد، سنیما سٹائل فل روشن منظر: ${cleanPrompt} — چمکدار روشنی، زبردست کیمرہ موشن تے فیصل آبادی شغل میلہ، ات چُک دتی!`;
       }
 
       if (!enhancedPrompt) {
@@ -425,11 +468,249 @@ async function startServer() {
         throw new Error('Model returned an empty prompt enhancement.');
       }
 
-      if (mode === 'text-to-video' || !mode) {
+      const hasIndicOrArabicScript = /[\u0600-\u06FF\u0A00-\u0A7F]/.test(enhancedPrompt);
+      if ((mode === 'text-to-video' || !mode) && !hasIndicOrArabicScript && !isFaisalabadi && !isPakPunjabi && !isIndPunjabi) {
         enhancedPrompt = enhanceTextToVideoPromptFraming(enhancedPrompt);
       }
 
       res.json({ enhancedPrompt });
+    } catch (error) {
+      const parsed = parseGeminiErrorMessage(error);
+      res.status(parsed.status).json({ error: parsed.message });
+    }
+  });
+
+  // 1a-2. Multi-Character AI Dialogue Generator (with automatic Faisalabadi Funny Punjabi support)
+  app.post('/api/generate-dialogue', async (req, res) => {
+    try {
+      const {
+        sceneSetting,
+        topic,
+        voiceLanguageId,
+        characters,
+        geminiKey,
+        groqKey,
+        openRouterKey,
+        togetherKey,
+      } = req.body as {
+        sceneSetting?: string;
+        topic?: string;
+        voiceLanguageId?: string;
+        characters?: Array<{ name?: string; gender?: string; ageTone?: string; languageId?: string }>;
+        geminiKey?: string;
+        groqKey?: string;
+        openRouterKey?: string;
+        togetherKey?: string;
+      };
+
+      const settingCheck = validateSafePromptAndScript(sceneSetting || '', 'Scene setting');
+      if (!settingCheck.safe) {
+        res.status(400).json({ error: settingCheck.reason || 'Blocked unsafe scene setting.' });
+        return;
+      }
+      const topicCheck = validateSafePromptAndScript(topic || '', 'Dialogue topic');
+      if (!topicCheck.safe) {
+        res.status(400).json({ error: topicCheck.reason || 'Blocked unsafe dialogue topic.' });
+        return;
+      }
+
+      const cast = (Array.isArray(characters) ? characters : [])
+        .slice(0, 6)
+        .map((c, idx) => ({
+          name: (c.name || `Character ${idx + 1}`).trim(),
+          gender: c.gender || 'neutral',
+          ageTone: c.ageTone || 'adult',
+          languageId: (c.languageId || voiceLanguageId || 'en').trim(),
+        }));
+
+      if (cast.length === 0) {
+        res.status(400).json({ error: 'At least one character is required.' });
+        return;
+      }
+
+      const cleanSetting = settingCheck.sanitized.trim() || 'A lively film location with warm cinematic lighting';
+      const cleanTopic = topicCheck.sanitized.trim();
+      const usesFaisalabadi =
+        voiceLanguageId === 'pa-FSD' || cast.some((c) => c.languageId === 'pa-FSD');
+      const usesPakPunjabi =
+        voiceLanguageId === 'pa-PK' || cast.some((c) => c.languageId === 'pa-PK');
+      const usesIndPunjabi =
+        voiceLanguageId === 'pa-IN' || cast.some((c) => c.languageId === 'pa-IN');
+
+      const buildFallbackLines = () => {
+        const c1 = cast[0]?.name || 'Ustad';
+        const c2 = cast[1]?.name || c1;
+        if (usesFaisalabadi) {
+          return [
+            {
+              speakerName: c1,
+              dialogue: `اوئے ہوئے ${c2}! کی گل اے استاد، اج تاں گھنٹہ گھر کول وی اینا رش نہیں جنی چس تیری گلاں وچ اے!`,
+              sceneAction: `${c1} grins widely and gestures dramatically`,
+            },
+            {
+              speakerName: c2,
+              dialogue: `چس آ گئی استاد جی! ${cleanTopic ? cleanTopic + ' — ' : ''}جدوں ساڈی جوڑی میدان وچ آوے، سارا فیصل آباد ات چُک دیندا اے!`,
+              sceneAction: `${c2} laughs energetically with witty comedy timing`,
+            },
+            ...(cast.length > 2
+              ? [
+                  {
+                    speakerName: cast[2].name,
+                    dialogue: 'اوئے بس کرو یارو، تہاڈیاں جگتاں سن کے کیمرہ وی ہس پیا اے!',
+                    sceneAction: `${cast[2].name} shakes head laughing playfully`,
+                  },
+                ]
+              : [
+                  {
+                    speakerName: c1,
+                    dialogue: 'آہا! ہن چاء منگواؤ تے شغل میلہ شروع کرو، واہ بھئی واہ!',
+                    sceneAction: `${c1} claps hands cheerfully`,
+                  },
+                ]),
+          ];
+        }
+        if (usesPakPunjabi) {
+          return [
+            {
+              speakerName: c1,
+              dialogue: `کی حال اے ${c2}؟ اج دا دن بڑا سوہنا اے تے کم وی پورا کمال ہونا چاہیدا اے۔`,
+              sceneAction: `${c1} speaks warmly looking directly ahead`,
+            },
+            {
+              speakerName: c2,
+              dialogue: `بالکل ٹھیک بھائی جان! ${cleanTopic || 'اسی پوری تیاری نال میدان وچ آئے آں۔'}`,
+              sceneAction: `${c2} nods confidently and smiles`,
+            },
+          ];
+        }
+        if (usesIndPunjabi) {
+          return [
+            {
+              speakerName: c1,
+              dialogue: `ਸਤਿ ਸ੍ਰੀ ਅਕਾਲ ${c2} ਜੀ! ਅੱਜ ਮੌਸਮ ਬੜਾ ਸੁਹਾਵਣਾ ਹੈ, ਚਲੋ ਨਵੀਂ ਕਹਾਣੀ ਸ਼ੁਰੂ ਕਰੀਏ।`,
+              sceneAction: `${c1} greets warmly on camera`,
+            },
+            {
+              speakerName: c2,
+              dialogue: `ਹਾਂਜੀ ਬਿਲਕੁਲ! ${cleanTopic || 'ਅੱਜ ਦਾ ਦਿਨ ਕਮਾਲ ਦਾ ਹੋਣ ਵਾਲਾ ਹੈ।'}`,
+              sceneAction: `${c2} smiles and replies enthusiastically`,
+            },
+          ];
+        }
+        return cast.map((actor, idx) => ({
+          speakerName: actor.name,
+          dialogue:
+            idx % 2 === 0
+              ? cleanTopic || `Stay ready, ${cast[1]?.name || 'team'} — this moment changes everything.`
+              : `Loud and clear, ${c1}. Let's bring this scene to life right now.`,
+          sceneAction: `${actor.name} delivers line with expressive cinematic emotion`,
+        }));
+      };
+
+      const styleInstruction = usesFaisalabadi
+        ? 'CRITICAL STYLE: Use hilarious, energetic, witty Faisalabadi Funny Punjabi (Shahmukhi/Urdu script) packed with playful jugat-baazi, Faisalabadi banter, and comedic expressions like "اوئے ہوئے!", "کی گل اے استاد!", "چس آ گئی!", "ات چُک دتی!", "شغل میلہ". Keep humor clean and lively.'
+        : usesPakPunjabi
+        ? 'Write authentic Pakistani Punjabi dialogue strictly in Shahmukhi (Urdu/Arabic) script.'
+        : usesIndPunjabi
+        ? 'Write authentic Indian Punjabi dialogue strictly in Gurmukhi script (ਪੰਜਾਬੀ).'
+        : 'Write each character line in the exact language specified by their languageId (e.g., Urdu in Urdu script, Sindhi in Sindhi script, Tamil in Tamil script, Telugu in Telugu script, English in English).';
+
+      const sysPrompt = `You are a cinema dialogue screenwriter. ${styleInstruction} Return strictly valid JSON: {"lines":[{"speakerName":"...","dialogue":"...","sceneAction":"..."}]} with 2 to 4 crisp spoken lines (max 28 words each) and English sceneAction descriptions.`;
+      const usrPrompt = `Scene setting: "${cleanSetting}".${cleanTopic ? ` Story/joke beat: "${cleanTopic}".` : ''} Cast: ${cast
+        .map((c) => `${c.name} (${c.gender}, ${c.ageTone}, lang=${c.languageId})`)
+        .join(', ')}. Generate engaging back-and-forth dialogue lines.`;
+
+      const resolvedGroqKey = (groqKey?.trim() || process.env.VITE_GROQ_API_KEY || process.env.GROQ_API_KEY || '').trim();
+      const resolvedOpenRouterKey = (openRouterKey?.trim() || process.env.VITE_OPENROUTER_API_KEY || process.env.OPENROUTER_API_KEY || '').trim();
+      const resolvedTogetherKey = (togetherKey?.trim() || process.env.VITE_TOGETHER_API_KEY || process.env.TOGETHER_API_KEY || '').trim();
+
+      let generatedLines: Array<{ speakerName: string; dialogue: string; sceneAction: string }> | null = null;
+
+      const parseJsonLines = (rawText: string) => {
+        const match = rawText.match(/\{[\s\S]*\}/);
+        if (!match) return null;
+        const parsed = JSON.parse(match[0]) as {
+          lines?: Array<{ speakerName?: string; dialogue?: string; sceneAction?: string }>;
+        };
+        if (!Array.isArray(parsed.lines) || parsed.lines.length === 0) return null;
+        const cleaned = parsed.lines
+          .filter((l) => l && typeof l.dialogue === 'string' && l.dialogue.trim().length > 0)
+          .slice(0, 6)
+          .map((l, idx) => ({
+            speakerName: (l.speakerName || cast[idx % cast.length].name).trim(),
+            dialogue: String(l.dialogue).trim(),
+            sceneAction: (l.sceneAction || `${cast[idx % cast.length].name} speaks expressively`).trim(),
+          }));
+        return cleaned.length > 0 ? cleaned : null;
+      };
+
+      if (geminiKey?.trim() || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY) {
+        try {
+          const ai = getGeminiClient(geminiKey);
+          const response = await ai.models.generateContent({
+            model: 'gemini-4-hydrogen',
+            contents: usrPrompt,
+            config: {
+              thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+              responseMimeType: 'application/json',
+              systemInstruction: sysPrompt,
+            },
+          });
+          generatedLines = parseJsonLines((response.text ?? '').trim());
+        } catch {
+          // Fall through
+        }
+      }
+
+      if (!generatedLines && resolvedGroqKey) {
+        try {
+          const raw = await enhancePromptWithGroq({
+            groqKey: resolvedGroqKey,
+            systemPrompt: sysPrompt,
+            userPrompt: usrPrompt,
+            maxTokens: 380,
+            temperature: usesFaisalabadi ? 0.9 : 0.75,
+          });
+          generatedLines = parseJsonLines(raw);
+        } catch {
+          // Fall through
+        }
+      }
+
+      if (!generatedLines && resolvedOpenRouterKey) {
+        try {
+          const raw = await enhancePromptWithOpenRouter({
+            openRouterKey: resolvedOpenRouterKey,
+            systemPrompt: sysPrompt,
+            userPrompt: usrPrompt,
+            maxTokens: 380,
+            temperature: usesFaisalabadi ? 0.9 : 0.75,
+          });
+          generatedLines = parseJsonLines(raw);
+        } catch {
+          // Fall through
+        }
+      }
+
+      if (!generatedLines && resolvedTogetherKey) {
+        try {
+          const raw = await enhancePromptWithTogetherAi({
+            togetherKey: resolvedTogetherKey,
+            systemPrompt: sysPrompt,
+            userPrompt: usrPrompt,
+            maxTokens: 380,
+            temperature: usesFaisalabadi ? 0.9 : 0.75,
+          });
+          generatedLines = parseJsonLines(raw);
+        } catch {
+          // Fall through
+        }
+      }
+
+      res.json({
+        lines: generatedLines || buildFallbackLines(),
+        styleUsed: usesFaisalabadi ? 'pa-FSD' : usesPakPunjabi ? 'pa-PK' : usesIndPunjabi ? 'pa-IN' : voiceLanguageId || 'auto',
+      });
     } catch (error) {
       const parsed = parseGeminiErrorMessage(error);
       res.status(parsed.status).json({ error: parsed.message });
@@ -468,7 +749,7 @@ async function startServer() {
 
       const langNote = sourceLanguage ? ` (spoken/written in ${sourceLanguage})` : '';
       const sysPrompt =
-        'You are a multilingual translator specializing in South Asian, Middle Eastern, East Asian, and European languages (including Urdu, Punjabi, Saraiki, Pashto, Balochi, Sindhi, Tamil, Telugu, Hindi, Bengali, Persian, Arabic, Marathi, Sanskrit, Russian, Chinese). Translate accurately to natural descriptive English. Return ONLY the translated English text.';
+        'You are a multilingual translator specializing in South Asian, Middle Eastern, East Asian, and European languages (including Urdu, Gurmukhi Punjabi pa-IN, Shahmukhi Punjabi pa-PK, Faisalabadi Funny Punjabi slang & jugat-baazi pa-FSD, Saraiki, Pashto, Balochi, Sindhi, Tamil, Telugu, Hindi, Bengali, Persian, Arabic, Marathi, Sanskrit, Russian, Chinese). Translate accurately to natural descriptive English. Return ONLY the translated English text.';
       const usrPrompt = `Translate this visual image/video generation prompt${langNote} into clear, vivid, natural English suitable for an AI image/video generator. If it is already English, refine grammar slightly without losing any meaning. Return ONLY the English prompt with no quotes or explanation:\n\n${cleanPrompt}`;
 
       if (geminiKey?.trim() || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY) {
@@ -1142,14 +1423,27 @@ async function startServer() {
       }
 
       const rawCode = (languageCode || 'en').trim();
+      const hasShahmukhiScript = /[\u0600-\u06FF]/.test(cleanText);
+      const hasGurmukhiScript = /[\u0A00-\u0A7F]/.test(cleanText);
+      const isShahmukhiPunjabi =
+        rawCode === 'pa-PK' ||
+        rawCode === 'pa-FSD' ||
+        ((rawCode === 'pa' || rawCode === 'pa-IN') && hasShahmukhiScript);
+
       const candidateLangs = Array.from(
-        new Set([
-          rawCode === 'zh-CN' ? 'zh-CN' : rawCode.split('-')[0] || 'en',
-          rawCode,
-          'ur',
-          'hi',
-          'en',
-        ])
+        new Set(
+          isShahmukhiPunjabi
+            ? ['ur', 'pa', 'hi', 'en']
+            : rawCode === 'pa-IN' || (rawCode === 'pa' && hasGurmukhiScript)
+            ? ['pa', 'hi', 'ur', 'en']
+            : [
+                rawCode === 'zh-CN' ? 'zh-CN' : rawCode.split('-')[0] || 'en',
+                rawCode,
+                'ur',
+                'hi',
+                'en',
+              ]
+        )
       );
 
       let audioChunks: Buffer[] | null = null;

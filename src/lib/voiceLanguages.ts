@@ -29,11 +29,29 @@ export const VOICE_LANGUAGES: VoiceLanguageOption[] = [
     isQuickPill: true,
   },
   {
-    id: 'pa',
+    id: 'pa-IN',
     speechCode: 'pa-IN',
     fallbackCodes: ['pa-Guru-IN', 'hi-IN'],
-    nativeLabel: 'ਪੰਜਾਬੀ',
-    englishName: 'Punjabi',
+    nativeLabel: 'ਪੰਜਾਬੀ (IN)',
+    englishName: 'Punjabi (Gurmukhi - India)',
+    translateHintCode: 'pa',
+    isQuickPill: true,
+  },
+  {
+    id: 'pa-PK',
+    speechCode: 'pa-PK',
+    fallbackCodes: ['ur-PK', 'pa-Arab-PK', 'pa-IN'],
+    nativeLabel: 'پنجابی (PK)',
+    englishName: 'Punjabi (Shahmukhi - Pakistan)',
+    translateHintCode: 'pa',
+    isQuickPill: true,
+  },
+  {
+    id: 'pa-FSD',
+    speechCode: 'pa-PK',
+    fallbackCodes: ['ur-PK', 'pa-Arab-PK', 'pa-IN'],
+    nativeLabel: 'فیصل آبادی',
+    englishName: 'Faisalabad Funny Punjabi',
     translateHintCode: 'pa',
     isQuickPill: true,
   },
@@ -171,7 +189,8 @@ export const QUICK_VOICE_LANGUAGES = VOICE_LANGUAGES.filter((l) => l.isQuickPill
 export const MORE_VOICE_LANGUAGES = VOICE_LANGUAGES.filter((l) => !l.isQuickPill);
 
 export function getVoiceLanguageById(id: string): VoiceLanguageOption {
-  return VOICE_LANGUAGES.find((l) => l.id === id) ?? VOICE_LANGUAGES[0];
+  const normalized = id === 'pa' ? 'pa-IN' : id;
+  return VOICE_LANGUAGES.find((l) => l.id === normalized) ?? VOICE_LANGUAGES[0];
 }
 
 export async function translatePromptToEnglish(
