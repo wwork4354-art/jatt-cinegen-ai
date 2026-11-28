@@ -29,11 +29,13 @@ import {
   MORE_VOICE_LANGUAGES,
   QUICK_VOICE_LANGUAGES,
 } from '../lib/voiceLanguages';
+import { CharacterLockCard } from './CharacterLockCard';
 import {
   CAMERA_MOTIONS,
   STYLE_PRESETS,
   type AspectRatio,
   type CameraMotionId,
+  type CharacterFaceLockConfig,
   type CreationItem,
   type StudioTab,
   type StylePresetId,
@@ -43,7 +45,7 @@ import {
 } from '../types/studio';
 
 interface PromptPanelProps {
-  mode: Exclude<StudioTab, 'creations' | 'lifetime-free'>;
+  mode: Exclude<StudioTab, 'creations' | 'lifetime-free' | 'film-director'>;
   language: LanguageCode;
   onLanguageChange: (code: LanguageCode) => void;
   voiceLanguageId: string;
@@ -73,6 +75,8 @@ interface PromptPanelProps {
   onVideoSourceModeChange: (mode: VideoSourceMode) => void;
   hfToken: string;
   onHfTokenChange: (token: string) => void;
+  digenKey: string;
+  onDigenKeyChange: (key: string) => void;
   agnesApiKey: string;
   onAgnesApiKeyChange: (key: string) => void;
   falKey: string;
@@ -96,6 +100,8 @@ interface PromptPanelProps {
   lipSyncAudioFile: File | null;
   onLipSyncAudioFileChange: (file: File | null) => void;
   recentImages: CreationItem[];
+  characterFaceLock: CharacterFaceLockConfig;
+  onCharacterFaceLockChange: (next: CharacterFaceLockConfig) => void;
   isGenerating: boolean;
   onGenerate: () => void;
 }
@@ -129,7 +135,10 @@ interface SpeechRecognitionInstanceLike {
   stop: () => void;
 }
 
-const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations' | 'lifetime-free'>, string[]> = {
+const SAMPLE_PROMPTS: Record<
+  Exclude<StudioTab, 'creations' | 'lifetime-free' | 'film-director'>,
+  string[]
+> = {
   'text-to-video': [
     'A majestic lion walking in a glowing cyberpunk jungle at sunset',
     'Slow aerial reveal over volcanic black sand beaches with rolling surf',
@@ -183,6 +192,8 @@ export function PromptPanel({
   onVideoSourceModeChange,
   hfToken,
   onHfTokenChange,
+  digenKey,
+  onDigenKeyChange,
   agnesApiKey,
   onAgnesApiKeyChange,
   falKey,
@@ -206,6 +217,8 @@ export function PromptPanel({
   lipSyncAudioFile,
   onLipSyncAudioFileChange,
   recentImages,
+  characterFaceLock,
+  onCharacterFaceLockChange,
   isGenerating,
   onGenerate,
 }: PromptPanelProps) {
@@ -240,6 +253,8 @@ export function PromptPanel({
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [isEngineSettingsOpen, setIsEngineSettingsOpen] = useState(false);
   const [showHfToken, setShowHfToken] = useState(false);
+  const [showDigenKey, setShowDigenKey] = useState(false);
+  const [digenSavedFlash, setDigenSavedFlash] = useState(false);
   const [showAgnesKey, setShowAgnesKey] = useState(false);
   const [showFalKey, setShowFalKey] = useState(false);
   const [showReplicateToken, setShowReplicateToken] = useState(false);
@@ -1078,6 +1093,15 @@ export function PromptPanel({
       </div>
       )}
 
+      {/* Character Face & Identity Consistency Lock (Image & Video) */}
+      {!isLipSyncMode && (
+        <CharacterLockCard
+          config={characterFaceLock}
+          onChange={onCharacterFaceLockChange}
+          recentImages={recentImages}
+        />
+      )}
+
       {/* Aspect Ratio */}
       <div className="space-y-2.5">
         <span className="block text-xs font-semibold tracking-wide text-slate-300">
@@ -1422,7 +1446,7 @@ export function PromptPanel({
                 </div>
                 <div className="text-[11px] text-slate-500">
                   {videoSourceMode === 'hf-gpu'
-                    ? 'Auto-routes SiliconFlow → HF Inference → Agnes AI → Fal.ai → Replicate → Google Veo → Animated Pollinations fallback.'
+                    ? 'Auto-routes SiliconFlow → HF Inference → Digen AI → Agnes AI → Fal.ai → Replicate → Google Veo → Animated Pollinations fallback.'
                     : 'Connect your own Colab, Hugging Face, or FastAPI video server endpoint.'}
                 </div>
               </div>
@@ -1444,6 +1468,7 @@ export function PromptPanel({
                     isEngineSettingsOpen ||
                     videoSourceMode === 'custom-backend' ||
                     hfToken.trim() ||
+                    digenKey.trim() ||
                     agnesApiKey.trim() ||
                     falKey.trim() ||
                     replicateToken.trim() ||
@@ -1558,6 +1583,75 @@ export function PromptPanel({
                   </div>
                   <p className="text-[11px] text-slate-500">
                     Saved locally in your browser. Unlocks faster priority on CogVideoX-2B, LTX-Video &amp; HunyuanVideo when free quotas allow.
+                  </p>
+                </div>
+
+                {/* Digen AI API Key (VITE_DIGEN_API_KEY) */}
+                <div className="space-y-1.5 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.03] p-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <label
+                      htmlFor="free-digen-key"
+                      className="flex items-center gap-1.5 text-xs font-medium text-slate-300"
+                    >
+                      <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                      Digen AI API Key (VITE_DIGEN_API_KEY)
+                    </label>
+                    <div className="flex items-center gap-2">
+                      {digenKey.trim() && (
+                        <>
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                            Active
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onDigenKeyChange('')}
+                            className="text-[11px] text-slate-400 hover:text-rose-300 transition-colors"
+                          >
+                            Clear
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex flex-1 items-center">
+                      <input
+                        id="free-digen-key"
+                        type={showDigenKey ? 'text' : 'password'}
+                        value={digenKey}
+                        onChange={(e) => onDigenKeyChange(e.target.value)}
+                        placeholder="digen_... (Digen AI Video & Talking Avatar)"
+                        autoComplete="off"
+                        className="min-h-[38px] w-full rounded-lg border border-white/10 bg-[#0D1118] pl-3 pr-10 py-1.5 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowDigenKey((s) => !s)}
+                        aria-label={showDigenKey ? 'Hide Digen AI key' : 'Show Digen AI key'}
+                        className="absolute right-2 rounded p-1 text-slate-400 hover:text-slate-200"
+                      >
+                        {showDigenKey ? (
+                          <EyeOff className="h-3.5 w-3.5" />
+                        ) : (
+                          <Eye className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onDigenKeyChange(digenKey.trim());
+                        setDigenSavedFlash(true);
+                        window.setTimeout(() => setDigenSavedFlash(false), 1800);
+                      }}
+                      className="min-h-[38px] shrink-0 rounded-lg border border-cyan-400/40 bg-cyan-400/15 px-3 py-1.5 text-xs font-semibold text-cyan-200 hover:bg-cyan-400/25 transition-colors"
+                    >
+                      {digenSavedFlash ? 'Saved' : 'Save'}
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-500">
+                    Connects Digen AI video &amp; talking avatar lip-sync alongside SiliconFlow, HF Inference, Agnes AI, Fal.ai, Replicate &amp; Google Veo.
                   </p>
                 </div>
 

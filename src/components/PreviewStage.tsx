@@ -155,7 +155,7 @@ export function PreviewStage({
                 {mode === 'text-to-image' ||
                 (mode === 'lifetime-free' && lifetimeSubTab === 'generate-image') ? (
                   <ImageIcon className="h-6 w-6" />
-                ) : mode === 'lip-sync' ? (
+                ) : mode === 'lip-sync' || mode === 'film-director' ? (
                   <Mic className="h-6 w-6" />
                 ) : (
                   <Film className="h-6 w-6" />
@@ -212,7 +212,10 @@ export function PreviewStage({
                   controls
                   autoPlay
                   loop
-                  muted={activeCreation.sourceMode !== 'lip-sync'}
+                  muted={
+                    activeCreation.sourceMode !== 'lip-sync' &&
+                    activeCreation.sourceMode !== 'film-director'
+                  }
                   playsInline
                   className="h-full w-full object-contain"
                 />
@@ -226,7 +229,8 @@ export function PreviewStage({
                 </div>
               )}
 
-              {activeCreation.sourceMode === 'lip-sync' && (
+              {(activeCreation.sourceMode === 'lip-sync' ||
+                activeCreation.sourceMode === 'film-director') && (
                 <div className="pointer-events-none absolute right-3 top-3 inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/30 bg-black/75 px-2.5 py-1 text-[11px] font-medium text-cyan-200 backdrop-blur-sm">
                   <Volume2 className="h-3.5 w-3.5 text-cyan-300" />
                   <span>Audio Enabled</span>
@@ -249,7 +253,7 @@ export function PreviewStage({
               {mode === 'text-to-image' ||
               (mode === 'lifetime-free' && lifetimeSubTab === 'generate-image') ? (
                 <ImageIcon className="h-7 w-7 text-slate-600" />
-              ) : mode === 'lip-sync' ? (
+              ) : mode === 'lip-sync' || mode === 'film-director' ? (
                 <Mic className="h-7 w-7 text-slate-600" />
               ) : (
                 <Film className="h-7 w-7 text-slate-600" />
@@ -261,6 +265,8 @@ export function PreviewStage({
                   ? lifetimeSubTab === 'generate-image'
                     ? 'Jatt Lifetime Free Image Engine'
                     : 'Jatt Lifetime Client-Side Motion Studio'
+                  : mode === 'film-director'
+                  ? 'Film Scene & Dialogue Director'
                   : mode === 'text-to-image'
                   ? strings.readyImageTitle
                   : mode === 'lip-sync'
@@ -270,6 +276,8 @@ export function PreviewStage({
               <p className="text-xs leading-relaxed text-slate-500">
                 {mode === 'lifetime-free'
                   ? '100% free forever with zero API keys, zero login, and zero monthly billing.'
+                  : mode === 'film-director'
+                  ? 'Cast multiple characters, assign spoken lines, and stitch a multi-character lip-synced sequence.'
                   : mode === 'lip-sync'
                   ? 'Upload any portrait photo + song or typed speech in 15 languages to animate it for free.'
                   : strings.readySubtitle}
@@ -371,14 +379,20 @@ export function PreviewStage({
               className="rounded-xl border border-white/[0.06] bg-[#07090E]/70 p-3 space-y-1"
             >
               <div className="text-[11px] font-mono tabular-nums text-cyan-300">
-                Keyframe 0{idx + 1} ·{' '}
-                {idx === 0
-                  ? 'Opening Act'
-                  : activeCreation.scenes!.length === 2
-                  ? 'Action & Finale'
-                  : idx === 1
-                  ? 'Action & Motion'
-                  : 'Closing Resolve'}
+                {activeCreation.sourceMode === 'film-director' ? (
+                  <>Shot 0{idx + 1} · Dialogue</>
+                ) : (
+                  <>
+                    Keyframe 0{idx + 1} ·{' '}
+                    {idx === 0
+                      ? 'Opening Act'
+                      : activeCreation.scenes!.length === 2
+                      ? 'Action & Finale'
+                      : idx === 1
+                      ? 'Action & Motion'
+                      : 'Closing Resolve'}
+                  </>
+                )}
               </div>
               <p className="text-xs leading-relaxed text-slate-300 line-clamp-2">
                 {sceneText}

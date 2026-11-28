@@ -392,6 +392,26 @@ async function tryTogetherFluxImage(params: {
   return null;
 }
 
+interface CachedImageEntry {
+  blob: Blob;
+  providerLabel: string;
+  width: number;
+  height: number;
+  createdAt: number;
+}
+
+const IMAGE_CACHE_TTL_MS = 10 * 60 * 1000;
+const imageResultCache = new Map<string, CachedImageEntry>();
+
+function buildImageCacheKey(
+  prompt: string,
+  aspectRatio: AspectRatio,
+  style: StylePresetId,
+  seed?: number
+): string {
+  return `${aspectRatio}|${style}|${seed ?? 'rand'}|${prompt.trim().toLowerCase()}`;
+}
+
 export async function fetchFreeAiImageWithWaterfall(params: {
   prompt: string;
   aspectRatio: AspectRatio;
@@ -399,62 +419,136 @@ export async function fetchFreeAiImageWithWaterfall(params: {
   seed?: number;
   togetherKey?: string;
   onStatus?: (msg: string) => void;
+  onProgress?: (percent: number, msg: string) => void;
 }): Promise<FetchedAiImageResult> {
-  const { prompt, aspectRatio, style, togetherKey, onStatus } = params;
+  const { prompt, aspectRatio, style, togetherKey, onStatus, onProgress } = params;
   const randomSeed = params.seed ?? Math.floor(100000 + Math.random() * 8999999);
   const { fetchWidth, fetchHeight } = getWaterfallDimensions(aspectRatio);
+
+  const emitProgress = (percent: number, msg: string) => {
+    onStatus?.(msg);
+    onProgress?.(percent, msg);
+  };
 
   const styleSuffix = STYLE_PROMPT_SUFFIX[style] ?? '';
   const cleanPrompt = sanitizeSafePrompt(
     styleSuffix ? `${prompt}, ${styleSuffix}` : prompt
   );
-  const encodedPrompt = encodeURIComponent(cleanPrompt);
 
-  if (togetherKey?.trim()) {
+  // Instant smart cache hit when deterministic seed/prompt already rendered
+  if (params.seed !== undefined) {
+    const cacheKey = buildImageCacheKey(cleanPrompt, aspectRatio, style, params.seed);
+    const cached = imageResultCache.get(cacheKey);
+    if (cached && Date.now() - cached.createdAt < IMAGE_CACHE_TTL_MS) {
+      emitProgress(92, `Loaded from Smart Image Cache (${cached.providerLabel})...`);
+      const objectUrl = URL.createObjectURL(cached.blob);
+      try {
+        const img = await loadImageFromObjectUrl(objectUrl, 5000);
+        return {
+          img,
+          blob: cached.blob,
+          objectUrl,
+          providerLabel: `${cached.providerLabel} (Cached)`,
+          width: cached.width,
+          height: cached.height,
+        };
+      } catch {
+        URL.revokeObjectURL(objectUrl);
+        imageResultCache.delete(cacheKey);
+      }
+    }
+  }
+
+  const encodedPrompt = encodeURIComponent(cleanPrompt);
+  const trimmedTogether = togetherKey?.trim() || '';
+
+  const saveToCache = (res: FetchedAiImageResult) => {
+    if (params.seed === undefined) return;
+    const cacheKey = buildImageCacheKey(cleanPrompt, aspectRatio, style, params.seed);
+    if (imageResultCache.size >= 16) {
+      const oldest = imageResultCache.keys().next().value;
+      if (oldest) imageResultCache.delete(oldest);
+    }
+    imageResultCache.set(cacheKey, {
+      blob: res.blob,
+      providerLabel: res.providerLabel,
+      width: res.width,
+      height: res.height,
+      createdAt: Date.now(),
+    });
+  };
+
+  // Race Together AI FLUX.1-schnell-Free (when active) OR race Pollinations Flux + Turbo in parallel (3-8s)
+  if (trimmedTogether) {
+    emitProgress(28, 'Fast-routing to Together AI (FLUX.1-schnell-Free)...');
     const togetherResult = await tryTogetherFluxImage({
       prompt: cleanPrompt,
       width: fetchWidth,
       height: fetchHeight,
-      togetherKey: togetherKey.trim(),
-      onStatus,
+      togetherKey: trimmedTogether,
+      onStatus: (m) => emitProgress(54, m),
     });
     if (togetherResult) {
+      emitProgress(92, 'Image generated via Together AI FLUX!');
+      saveToCache(togetherResult);
       return togetherResult;
     }
-    onStatus?.('Together AI busy or quota reached — switching to Pollinations Flux AI...');
+    emitProgress(46, 'Together AI unavailable — racing Pollinations Flux & Turbo...');
   }
 
   const primaryFluxUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&private=true&model=flux&seed=${randomSeed}`;
-  const backupTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=turbo&seed=${randomSeed + 99}`;
-  const retryFluxUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
+  const backupTurboUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=turbo&seed=${randomSeed}`;
+  const fastKleinUrl = `https://image.pollinations.ai/prompt/${encodeURIComponent(
     sanitizeSafePrompt(prompt)
-  )}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=flux&seed=${randomSeed + 777}`;
+  )}?width=${fetchWidth}&height=${fetchHeight}&nologo=true&model=flux&seed=${randomSeed + 7}`;
 
-  const providers: Array<{ label: string; url: string }> = [
-    { label: 'Pollinations Flux AI', url: primaryFluxUrl },
-    { label: 'Pollinations Turbo AI', url: backupTurboUrl },
-    { label: 'Pollinations Flux (Alt Seed)', url: retryFluxUrl },
-  ];
+  emitProgress(38, 'Racing Pollinations Flux & Turbo AI in parallel (3–8s target)...');
 
-  for (const provider of providers) {
-    try {
-      onStatus?.(`Generating real AI image via ${provider.label}...`);
-      return await fetchAndValidateImageUrl(
-        provider.url,
+  try {
+    const raced = await Promise.any([
+      fetchAndValidateImageUrl(
+        primaryFluxUrl,
         fetchWidth,
         fetchHeight,
         true,
-        provider.label,
-        15000
+        'Pollinations Flux AI',
+        11000
+      ),
+      fetchAndValidateImageUrl(
+        backupTurboUrl,
+        fetchWidth,
+        fetchHeight,
+        true,
+        'Pollinations Turbo AI',
+        9500
+      ),
+    ]);
+    emitProgress(92, `Delivered via ${raced.providerLabel}!`);
+    saveToCache(raced);
+    return raced;
+  } catch {
+    emitProgress(64, 'Trying clean alternate Flux seed...');
+    try {
+      const retry = await fetchAndValidateImageUrl(
+        fastKleinUrl,
+        fetchWidth,
+        fetchHeight,
+        true,
+        'Pollinations Flux (Fast Retry)',
+        11000
       );
+      saveToCache(retry);
+      return retry;
     } catch {
-      onStatus?.(`${provider.label} busy — switching model/seed...`);
+      // Fall through cleanly to HD photographic fallback
     }
   }
 
   // Real HD Photographic Fallback (Wikimedia Commons + Verified Unsplash HD Photography)
+  emitProgress(78, 'Searching matching HD photography fallback...');
   const photos = await fetchRealPhotoFallbackList(prompt, aspectRatio, 1, onStatus);
   if (photos.length > 0) {
+    saveToCache(photos[0]);
     return photos[0];
   }
 

@@ -2,9 +2,41 @@ export type StudioTab =
   | 'text-to-video'
   | 'image-to-video'
   | 'lip-sync'
+  | 'film-director'
   | 'text-to-image'
   | 'lifetime-free'
   | 'creations';
+
+export type CharacterVoiceGender = 'male' | 'female' | 'neutral';
+export type CharacterVoiceAge = 'young' | 'adult' | 'elder';
+export type FilmTransitionStyle = 'crossfade' | 'film-cut' | 'whip-pan';
+export type FilmAmbienceMood = 'cinema-drama' | 'warm-sunset' | 'noir-suspense' | 'none';
+
+export interface CharacterFaceLockConfig {
+  enabled: boolean;
+  characterName: string;
+  fixedSeed: number;
+  traitsPrompt: string;
+  referenceImageDataUrl: string | null;
+}
+
+export interface FilmCharacter {
+  id: string;
+  name: string;
+  gender: CharacterVoiceGender;
+  ageTone: CharacterVoiceAge;
+  languageId: string;
+  appearancePrompt: string;
+  portraitDataUrl: string | null;
+  seed: number;
+}
+
+export interface FilmDialogueShot {
+  id: string;
+  characterId: string;
+  dialogue: string;
+  sceneAction: string;
+}
 
 export type LifetimeStudioSubTab = 'generate-image' | 'generate-video';
 
@@ -52,6 +84,7 @@ export interface EngineVaultKeys {
   togetherKey?: string;
   groqKey?: string;
   openRouterKey?: string;
+  digenKey?: string;
 }
 
 export interface StylePresetOption {
@@ -70,7 +103,13 @@ export interface CameraMotionOption {
 export interface CreationItem {
   id: string;
   kind: 'image' | 'video';
-  sourceMode: 'text-to-image' | 'text-to-video' | 'image-to-video' | 'lip-sync' | 'lifetime-free';
+  sourceMode:
+    | 'text-to-image'
+    | 'text-to-video'
+    | 'image-to-video'
+    | 'lip-sync'
+    | 'film-director'
+    | 'lifetime-free';
   prompt: string;
   style: StylePresetId;
   aspectRatio: AspectRatio;

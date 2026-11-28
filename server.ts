@@ -815,6 +815,7 @@ async function startServer() {
       aspectRatio,
       style,
       duration,
+      seed,
       imageDataUrl,
       geminiKey,
       hfToken,
@@ -823,12 +824,14 @@ async function startServer() {
       agnesKey,
       falKey,
       replicateToken,
+      digenKey,
     } = req.body as {
       prompt?: string;
       mode?: HfVideoMode;
       aspectRatio?: HfAspectRatio;
       style?: StylePreset;
       duration?: '5s' | '10s' | '15s';
+      seed?: number;
       imageDataUrl?: string;
       geminiKey?: string;
       hfToken?: string;
@@ -837,6 +840,7 @@ async function startServer() {
       agnesKey?: string;
       falKey?: string;
       replicateToken?: string;
+      digenKey?: string;
     };
 
     const cleanPrompt = (prompt || '').trim();
@@ -849,6 +853,7 @@ async function startServer() {
     const safeRatio: HfAspectRatio =
       aspectRatio === '9:16' || aspectRatio === '1:1' ? aspectRatio : '16:9';
     const safeDuration = duration === '10s' || duration === '15s' ? duration : '5s';
+    const safeSeed = typeof seed === 'number' && Number.isFinite(seed) ? Math.floor(seed) : undefined;
 
     const styleSuffix =
       style === 'cinematic'
@@ -922,6 +927,7 @@ async function startServer() {
           mode: safeMode,
           aspectRatio: safeRatio,
           duration: safeDuration,
+          seed: safeSeed,
           imageDataUrl,
           publicOrigin,
           geminiKey,
@@ -931,6 +937,7 @@ async function startServer() {
           agnesKey,
           falKey,
           replicateToken,
+          digenKey,
           isAborted: () => aborted,
           onEvent: (event) => {
             sendEvent(event);
@@ -1095,13 +1102,14 @@ async function startServer() {
     }
   });
 
-  // 2d. AI Lip-Sync & Singing Photo SSE Endpoint (SadTalker / HallO / Wav2Lip / Replicate SadTalker)
+  // 2d. AI Lip-Sync & Singing Photo SSE Endpoint (Digen AI / SadTalker / HallO / Wav2Lip / Replicate SadTalker)
   app.post('/api/generate/lip-sync', async (req, res) => {
-    const { imageDataUrl, audioDataUrl, hfToken, replicateToken } = req.body as {
+    const { imageDataUrl, audioDataUrl, hfToken, replicateToken, digenKey } = req.body as {
       imageDataUrl?: string;
       audioDataUrl?: string;
       hfToken?: string;
       replicateToken?: string;
+      digenKey?: string;
     };
 
     if (!imageDataUrl || !audioDataUrl) {
@@ -1129,7 +1137,7 @@ async function startServer() {
     sendEvent({
       type: 'progress',
       percent: 12,
-      message: 'Routing portrait + audio to Hugging Face Lip-Sync GPU...',
+      message: 'Routing portrait + audio to AI Lip-Sync Engine...',
     });
 
     try {
@@ -1138,6 +1146,7 @@ async function startServer() {
         audioDataUrl,
         hfToken,
         replicateToken,
+        digenKey,
         isAborted: () => aborted,
         onEvent: (event) => {
           sendEvent(event);

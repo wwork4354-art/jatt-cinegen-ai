@@ -27,6 +27,35 @@ interface CachedVideoEntry {
 const hfVideoCache = new Map<string, CachedVideoEntry>();
 const refImageCache = new Map<string, CachedVideoEntry>();
 
+interface VideoResultCacheEntry {
+  buffer: Buffer;
+  mimeType: string;
+  width: number;
+  height: number;
+  providerLabel: string;
+  createdAt: number;
+}
+
+const videoPromptCache = new Map<string, VideoResultCacheEntry>();
+
+function getCachedRenderedVideo(key: string): VideoResultCacheEntry | undefined {
+  const entry = videoPromptCache.get(key);
+  if (!entry) return undefined;
+  if (Date.now() - entry.createdAt > 10 * 60 * 1000) {
+    videoPromptCache.delete(key);
+    return undefined;
+  }
+  return entry;
+}
+
+function storeCachedRenderedVideo(key: string, entry: Omit<VideoResultCacheEntry, 'createdAt'>): void {
+  if (videoPromptCache.size >= 8) {
+    const oldestKey = videoPromptCache.keys().next().value;
+    if (oldestKey) videoPromptCache.delete(oldestKey);
+  }
+  videoPromptCache.set(key, { ...entry, createdAt: Date.now() });
+}
+
 export function getCachedHfVideo(id: string): CachedVideoEntry | undefined {
   const entry = hfVideoCache.get(id);
   if (!entry) return undefined;
@@ -239,7 +268,10 @@ async function tryGoogleVeoVideo(params: {
     }
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     onProgress(Math.min(78, 25 + Math.round(elapsedSec * 0.8)), 'Generating cinematic video via Google Veo 2.0...');
-    await new Promise((r) => setTimeout(r, 4000));
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) {
+      throw new Error('Aborted');
+    }
     operation = await withTimeout(
       ai.operations.getVideosOperation({ operation }),
       10000,
@@ -281,11 +313,12 @@ async function trySiliconFlowWanVideo(params: {
   negativePrompt?: string;
   mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
+  seed?: number;
   imageDataUrl?: string;
   onProgress: (percent: number, message: string) => void;
   isAborted?: () => boolean;
 }): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number }> {
-  const { apiKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, onProgress, isAborted } =
+  const { apiKey, prompt, negativePrompt, mode, aspectRatio, seed, imageDataUrl, onProgress, isAborted } =
     params;
   onProgress(22, 'Routing to Qwen Wan 2.1 (SiliconFlow API)...');
 
@@ -313,6 +346,7 @@ async function trySiliconFlowWanVideo(params: {
             model: isI2v ? 'Wan-AI/Wan2.1-I2V-14B-720P' : 'Wan-AI/Wan2.1-T2V-14B',
             prompt,
             ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+            ...(typeof seed === 'number' ? { seed } : {}),
             image_size: imageSize,
             ...(isI2v && imageDataUrl ? { image: imageDataUrl } : {}),
           }),
@@ -347,7 +381,10 @@ async function trySiliconFlowWanVideo(params: {
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     onProgress(Math.min(82, 34 + elapsedSec), 'Generating Qwen Wan 2.1 motion frames...');
 
-    await new Promise((r) => setTimeout(r, 3500));
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) {
+      throw new Error('Aborted');
+    }
     const statusRes = await withTimeout(
       fetch(`${activeHost}/v1/video/status`, {
         method: 'POST',
@@ -480,7 +517,8 @@ async function tryAgnesAiVideo(params: {
     if (isAborted?.()) throw new Error('Aborted');
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     onProgress(Math.min(82, 34 + elapsedSec), 'Generating motion frames via Agnes-Video-2.5...');
-    await new Promise((r) => setTimeout(r, 3500));
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) throw new Error('Aborted');
 
     let resultJson: Record<string, unknown> | null = null;
     for (const pollUrl of pollEndpoints) {
@@ -559,12 +597,13 @@ async function tryFalAiVideo(params: {
   negativePrompt?: string;
   mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
+  seed?: number;
   imageDataUrl?: string;
   timeoutMs: number;
   onProgress: (percent: number, message: string) => void;
   isAborted?: () => boolean;
 }): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride: string }> {
-  const { apiKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, timeoutMs, onProgress, isAborted } =
+  const { apiKey, prompt, negativePrompt, mode, aspectRatio, seed, imageDataUrl, timeoutMs, onProgress, isAborted } =
     params;
 
   const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
@@ -591,6 +630,7 @@ async function tryFalAiVideo(params: {
       prompt,
       ...(negativePrompt && model.id.includes('wan') ? { negative_prompt: negativePrompt } : {}),
       ...(model.id.includes('wan') ? { aspect_ratio: aspectRatio } : {}),
+      ...(typeof seed === 'number' && model.id.includes('wan') ? { seed } : {}),
     };
     if (isI2v && imageDataUrl) {
       submitPayload.image_url = imageDataUrl;
@@ -656,7 +696,8 @@ async function tryFalAiVideo(params: {
       if (isAborted?.()) throw new Error('Aborted');
       const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
       onProgress(Math.min(82, 36 + elapsedSec), `Generating motion frames via ${model.label}...`);
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 1500));
+      if (isAborted?.()) throw new Error('Aborted');
 
       const statusRes = await withTimeout(
         fetch(statusUrl, {
@@ -714,12 +755,13 @@ async function tryReplicateVideo(params: {
   negativePrompt?: string;
   mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
+  seed?: number;
   imageDataUrl?: string;
   timeoutMs: number;
   onProgress: (percent: number, message: string) => void;
   isAborted?: () => boolean;
 }): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride: string }> {
-  const { apiKey, prompt, negativePrompt, mode, aspectRatio, imageDataUrl, timeoutMs, onProgress, isAborted } =
+  const { apiKey, prompt, negativePrompt, mode, aspectRatio, seed, imageDataUrl, timeoutMs, onProgress, isAborted } =
     params;
 
   const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
@@ -742,6 +784,7 @@ async function tryReplicateVideo(params: {
     const input: Record<string, unknown> = {
       prompt,
       ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+      ...(typeof seed === 'number' ? { seed } : {}),
       aspect_ratio: aspectRatio,
       sample_steps: 25,
     };
@@ -800,7 +843,8 @@ async function tryReplicateVideo(params: {
       if (isAborted?.()) throw new Error('Aborted');
       const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
       onProgress(Math.min(82, 38 + elapsedSec), `Generating Wan 2.1 frames via ${model.label}...`);
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => setTimeout(r, 1500));
+      if (isAborted?.()) throw new Error('Aborted');
 
       const pollUrl =
         pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
@@ -843,6 +887,257 @@ async function tryReplicateVideo(params: {
   }
 
   throw new Error(lastError);
+}
+
+// Engine 2E: Digen AI REST API (Video Generation & Talking Avatar)
+async function tryDigenAiVideo(params: {
+  apiKey: string;
+  prompt: string;
+  negativePrompt?: string;
+  mode: HfVideoMode;
+  aspectRatio: HfAspectRatio;
+  duration?: '5s' | '10s' | '15s';
+  seed?: number;
+  imageDataUrl?: string;
+  timeoutMs: number;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride: string }> {
+  const {
+    apiKey,
+    prompt,
+    negativePrompt,
+    mode,
+    aspectRatio,
+    duration,
+    seed,
+    imageDataUrl,
+    timeoutMs,
+    onProgress,
+    isAborted,
+  } = params;
+
+  const trimmedKey = apiKey.trim();
+  if (!trimmedKey) {
+    throw new Error('Digen AI API key is missing');
+  }
+
+  const isI2v = mode === 'image-to-video' && Boolean(imageDataUrl);
+  const width = aspectRatio === '9:16' ? 720 : aspectRatio === '1:1' ? 768 : 1280;
+  const height = aspectRatio === '9:16' ? 1280 : aspectRatio === '1:1' ? 768 : 720;
+  const durationSeconds = duration === '10s' || duration === '15s' ? 10 : 5;
+
+  onProgress(24, isI2v ? 'Routing photo to Digen AI Image-to-Video Engine...' : 'Routing to Digen AI Video Engine...');
+
+  const submitEndpoints = [
+    'https://api.digen.ai/v2/video/generate',
+    'https://api.digen.ai/v1/video/generate',
+    'https://api.digen.ai/v1/videos/generations',
+  ];
+
+  const payload: Record<string, unknown> = {
+    prompt,
+    aspect_ratio: aspectRatio,
+    duration: durationSeconds,
+    ...(negativePrompt ? { negative_prompt: negativePrompt } : {}),
+    ...(typeof seed === 'number' ? { seed } : {}),
+    ...(isI2v && imageDataUrl ? { image_url: imageDataUrl, image: imageDataUrl } : {}),
+  };
+
+  let created: Record<string, unknown> | null = null;
+  let lastError = 'Digen AI video endpoint unavailable';
+
+  for (const endpoint of submitEndpoints) {
+    if (isAborted?.()) throw new Error('Aborted');
+    try {
+      const submitRes = await withTimeout(
+        fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${trimmedKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        }),
+        12000,
+        'Digen AI submit'
+      );
+
+      if (!submitRes.ok) {
+        let detail = '';
+        try {
+          const errJson = (await submitRes.json()) as {
+            error?: { message?: string } | string;
+            message?: string;
+            detail?: string;
+          };
+          detail =
+            typeof errJson.error === 'string'
+              ? errJson.error
+              : errJson.error?.message || errJson.message || errJson.detail || '';
+        } catch {
+          // Ignore parse failure
+        }
+
+        if (submitRes.status === 401 || submitRes.status === 403) {
+          throw new Error(detail || 'Digen AI API key unauthorized — switching to next active provider');
+        }
+        if (submitRes.status === 402) {
+          throw new Error(detail || 'Digen AI credits exhausted — switching to next active provider');
+        }
+        if (submitRes.status === 429) {
+          throw new Error(detail || 'Digen AI rate limit reached — switching to next active provider');
+        }
+
+        lastError = detail || `Digen AI HTTP ${submitRes.status}`;
+        if (submitRes.status === 404 || submitRes.status === 405) {
+          continue;
+        }
+        continue;
+      }
+
+      created = (await submitRes.json()) as Record<string, unknown>;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Digen AI request failed';
+      if (
+        msg.includes('unauthorized') ||
+        msg.includes('credits exhausted') ||
+        msg.includes('rate limit')
+      ) {
+        throw err;
+      }
+      lastError = msg;
+    }
+  }
+
+  if (!created) {
+    throw new Error(lastError);
+  }
+
+  const createdData =
+    created.data && typeof created.data === 'object'
+      ? (created.data as Record<string, unknown>)
+      : undefined;
+  const createdOutput =
+    created.output && typeof created.output === 'object'
+      ? (created.output as Record<string, unknown>)
+      : undefined;
+
+  const immediateUrl =
+    (typeof created.video_url === 'string' && created.video_url) ||
+    (typeof created.url === 'string' && created.url) ||
+    (typeof created.videoUrl === 'string' && created.videoUrl) ||
+    (typeof createdData?.video_url === 'string' && createdData.video_url) ||
+    (typeof createdData?.url === 'string' && createdData.url) ||
+    (typeof createdOutput?.video_url === 'string' && createdOutput.video_url) ||
+    (typeof createdOutput?.url === 'string' && createdOutput.url) ||
+    '';
+
+  if (immediateUrl && isSafeExternalHttpsUrl(immediateUrl)) {
+    onProgress(88, 'Downloading generated MP4 from Digen AI...');
+    const downloaded = await downloadVideoBuffer(immediateUrl, undefined, 'Digen AI');
+    return { ...downloaded, width, height, badgeOverride: 'Rendered via Digen AI' };
+  }
+
+  const taskId = String(
+    created.task_id ||
+      created.job_id ||
+      created.video_id ||
+      created.id ||
+      createdData?.task_id ||
+      createdData?.job_id ||
+      createdData?.video_id ||
+      createdData?.id ||
+      ''
+  ).trim();
+
+  if (!taskId) {
+    throw new Error('Digen AI did not return a video URL or task ID');
+  }
+
+  const pollEndpoints = [
+    `https://api.digen.ai/v2/video/status/${encodeURIComponent(taskId)}`,
+    `https://api.digen.ai/v1/video/status?task_id=${encodeURIComponent(taskId)}`,
+    `https://api.digen.ai/v1/tasks/${encodeURIComponent(taskId)}`,
+  ];
+
+  const startedAt = Date.now();
+  const maxPollMs = Math.min(42000, Math.max(10000, timeoutMs - 4000));
+
+  while (Date.now() - startedAt < maxPollMs) {
+    if (isAborted?.()) throw new Error('Aborted');
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    onProgress(Math.min(82, 34 + elapsedSec), 'Generating cinema motion frames via Digen AI...');
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) throw new Error('Aborted');
+
+    let statusJson: Record<string, unknown> | null = null;
+    for (const pollUrl of pollEndpoints) {
+      try {
+        const pollRes = await withTimeout(
+          fetch(pollUrl, {
+            method: 'GET',
+            headers: {
+              Authorization: `Bearer ${trimmedKey}`,
+            },
+          }),
+          8000,
+          'Digen AI status'
+        );
+        if (pollRes.status === 404) continue;
+        if (pollRes.status === 401 || pollRes.status === 402 || pollRes.status === 403 || pollRes.status === 429) {
+          throw new Error(`Digen AI status HTTP ${pollRes.status}`);
+        }
+        if (!pollRes.ok) {
+          throw new Error(`Digen AI status HTTP ${pollRes.status}`);
+        }
+        statusJson = (await pollRes.json()) as Record<string, unknown>;
+        break;
+      } catch (err) {
+        if (pollUrl === pollEndpoints[pollEndpoints.length - 1]) {
+          throw err;
+        }
+      }
+    }
+
+    if (!statusJson) continue;
+
+    const dataObj =
+      statusJson.data && typeof statusJson.data === 'object'
+        ? (statusJson.data as Record<string, unknown>)
+        : undefined;
+    const outputObj =
+      statusJson.output && typeof statusJson.output === 'object'
+        ? (statusJson.output as Record<string, unknown>)
+        : undefined;
+
+    const statusText = String(statusJson.status || dataObj?.status || '').toLowerCase();
+    const videoUrl =
+      (typeof statusJson.video_url === 'string' && statusJson.video_url) ||
+      (typeof statusJson.url === 'string' && statusJson.url) ||
+      (typeof dataObj?.video_url === 'string' && dataObj.video_url) ||
+      (typeof dataObj?.url === 'string' && dataObj.url) ||
+      (typeof outputObj?.video_url === 'string' && outputObj.video_url) ||
+      (typeof outputObj?.url === 'string' && outputObj.url) ||
+      '';
+
+    if (videoUrl && isSafeExternalHttpsUrl(videoUrl)) {
+      onProgress(88, 'Downloading generated MP4 from Digen AI...');
+      const downloaded = await downloadVideoBuffer(videoUrl, undefined, 'Digen AI');
+      return { ...downloaded, width, height, badgeOverride: 'Rendered via Digen AI' };
+    }
+
+    if (statusText === 'failed' || statusText === 'error' || statusText === 'canceled' || statusText === 'cancelled') {
+      const errDetail =
+        (typeof statusJson.error === 'string' && statusJson.error) ||
+        (typeof statusJson.message === 'string' && statusJson.message) ||
+        'Digen AI video generation failed';
+      throw new Error(errDetail);
+    }
+  }
+
+  throw new Error('Digen AI video generation timed out');
 }
 
 async function runGradioJob(params: {
@@ -1217,6 +1512,7 @@ export async function generateSmartMultiEngineVideo(params: {
   mode: HfVideoMode;
   aspectRatio: HfAspectRatio;
   duration?: '5s' | '10s' | '15s';
+  seed?: number;
   imageDataUrl?: string;
   publicOrigin?: string;
   geminiKey?: string;
@@ -1226,6 +1522,7 @@ export async function generateSmartMultiEngineVideo(params: {
   agnesKey?: string;
   falKey?: string;
   replicateToken?: string;
+  digenKey?: string;
   onEvent: (event: HfProgressEvent) => void;
   isAborted?: () => boolean;
 }): Promise<void> {
@@ -1235,6 +1532,7 @@ export async function generateSmartMultiEngineVideo(params: {
     mode,
     aspectRatio,
     duration,
+    seed,
     imageDataUrl,
     publicOrigin,
     geminiKey,
@@ -1244,12 +1542,34 @@ export async function generateSmartMultiEngineVideo(params: {
     agnesKey,
     falKey,
     replicateToken,
+    digenKey,
     onEvent,
     isAborted,
   } = params;
 
   const resolvedNegativePrompt = negativePrompt?.trim() || buildVideoNegativePrompt(prompt);
   const { width, height } = getSpaceDims(aspectRatio);
+
+  // Instant 0ms cache lookup for identical prompt + aspectRatio + mode + consistency seed
+  const cacheKey = `${mode}|${aspectRatio}|${seed ?? 'rand'}|${prompt.toLowerCase().trim()}|${
+    imageDataUrl ? `${imageDataUrl.slice(0, 64)}:${imageDataUrl.length}` : ''
+  }`;
+  const cachedHit = getCachedRenderedVideo(cacheKey);
+  if (cachedHit) {
+    const fileId = storeCachedHfVideo(cachedHit.buffer, cachedHit.mimeType);
+    onEvent({
+      type: 'done',
+      percent: 100,
+      message: `${cachedHit.providerLabel} (Instant Cache)!`,
+      providerLabel: cachedHit.providerLabel,
+      videoApiPath: `/api/hf-video-file/${fileId}`,
+      mimeType: cachedHit.mimeType,
+      width: cachedHit.width,
+      height: cachedHit.height,
+    });
+    return;
+  }
+
   const imageBlob = mode === 'image-to-video' && imageDataUrl ? dataUrlToBlob(imageDataUrl) : null;
 
   // Resolve public image[0] URL for Pollinations Video API (supports both https:// URLs and uploaded images)
@@ -1266,6 +1586,7 @@ export async function generateSmartMultiEngineVideo(params: {
     }
   }
 
+  // 0ms key validation — immediately skip inactive/empty keys without network timeouts
   const resolvedGeminiKey = (geminiKey?.trim() || process.env.VITE_GEMINI_API_KEY || '').trim();
   const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || process.env.HF_TOKEN || '').trim();
   const resolvedSiliconFlowKey = (
@@ -1291,6 +1612,12 @@ export async function generateSmartMultiEngineVideo(params: {
     process.env.REPLICATE_API_TOKEN ||
     ''
   ).trim();
+  const resolvedDigenKey = (
+    digenKey?.trim() ||
+    process.env.VITE_DIGEN_API_KEY ||
+    process.env.DIGEN_API_KEY ||
+    ''
+  ).trim();
   const resolvedPollinationsKey = (
     pollinationsKey?.trim() ||
     process.env.VITE_POLLINATIONS_KEY ||
@@ -1308,14 +1635,31 @@ export async function generateSmartMultiEngineVideo(params: {
     }
   };
 
-  const attempts: Array<{
+  let raceWon = false;
+  const raceAborted = () => Boolean(isAborted?.() || raceWon);
+  const raceProgressCb = (percent: number, message: string) => {
+    if (!raceAborted()) {
+      onEvent({ type: 'progress', percent, message });
+    }
+  };
+
+  type VideoAttemptResult = {
+    buffer: Buffer;
+    mimeType: string;
+    width: number;
+    height: number;
+    badgeOverride?: string;
+  };
+
+  const parallelRestRacers: Array<{
+    name: string;
     badge: string;
-    run: () => Promise<{ buffer: Buffer; mimeType: string; width: number; height: number; badgeOverride?: string }>;
+    run: () => Promise<VideoAttemptResult>;
   }> = [];
 
-  // PRIORITY 1: SiliconFlow Video API (Qwen Wan-AI/Wan2.1-T2V-14B / I2V-14B-720P) — real character & scene motion
   if (resolvedSiliconFlowKey) {
-    attempts.push({
+    parallelRestRacers.push({
+      name: 'SiliconFlow',
       badge: 'Rendered via Qwen Wan 2.1 (SiliconFlow)',
       run: () =>
         trySiliconFlowWanVideo({
@@ -1324,17 +1668,98 @@ export async function generateSmartMultiEngineVideo(params: {
           negativePrompt: resolvedNegativePrompt,
           mode,
           aspectRatio,
+          seed,
           imageDataUrl,
-          onProgress: progressCb,
-          isAborted,
+          onProgress: raceProgressCb,
+          isAborted: raceAborted,
         }),
     });
   }
 
-  // PRIORITY 2: Hugging Face Inference Providers Router (Wan2.1, CogVideoX-5b, LTX-Video) — real character & object motion
+  if (resolvedDigenKey) {
+    parallelRestRacers.push({
+      name: 'Digen AI',
+      badge: 'Rendered via Digen AI',
+      run: () =>
+        tryDigenAiVideo({
+          apiKey: resolvedDigenKey,
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
+          duration,
+          seed,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: raceProgressCb,
+          isAborted: raceAborted,
+        }),
+    });
+  }
+
+  if (resolvedAgnesKey) {
+    parallelRestRacers.push({
+      name: 'Agnes AI',
+      badge: 'Rendered via Agnes AI (Agnes-Video-2.5)',
+      run: () =>
+        tryAgnesAiVideo({
+          apiKey: resolvedAgnesKey,
+          prompt,
+          mode,
+          aspectRatio,
+          duration,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: raceProgressCb,
+          isAborted: raceAborted,
+        }),
+    });
+  }
+
+  if (resolvedFalKey) {
+    parallelRestRacers.push({
+      name: 'Fal.ai',
+      badge: 'Rendered via Fal.ai Video',
+      run: () =>
+        tryFalAiVideo({
+          apiKey: resolvedFalKey,
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
+          seed,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: raceProgressCb,
+          isAborted: raceAborted,
+        }),
+    });
+  }
+
+  if (resolvedReplicateToken) {
+    parallelRestRacers.push({
+      name: 'Replicate',
+      badge: 'Rendered via Replicate Wan 2.1',
+      run: () =>
+        tryReplicateVideo({
+          apiKey: resolvedReplicateToken,
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
+          seed,
+          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: raceProgressCb,
+          isAborted: raceAborted,
+        }),
+    });
+  }
+
   if (resolvedHfToken) {
     if (mode === 'image-to-video' && imageBlob) {
-      attempts.push({
+      parallelRestRacers.push({
+        name: 'HF Wan2.1-I2V',
         badge: 'Rendered via HF Inference (Wan2.1-I2V)',
         run: () =>
           tryHuggingFaceInferenceVideo({
@@ -1348,12 +1773,13 @@ export async function generateSmartMultiEngineVideo(params: {
             aspectRatio,
             imageBlob,
             timeoutMs: remainingBudget(),
-            onProgress: progressCb,
-            isAborted,
+            onProgress: raceProgressCb,
+            isAborted: raceAborted,
           }),
       });
     } else {
-      attempts.push({
+      parallelRestRacers.push({
+        name: 'HF Wan2.1-1.3B',
         badge: 'Rendered via HF Inference (Wan2.1-1.3B)',
         run: () =>
           tryHuggingFaceInferenceVideo({
@@ -1366,117 +1792,139 @@ export async function generateSmartMultiEngineVideo(params: {
             mode,
             aspectRatio,
             timeoutMs: remainingBudget(),
-            onProgress: progressCb,
-            isAborted,
-          }),
-      });
-
-      attempts.push({
-        badge: 'Rendered via HF Inference (Wan2.1-14B)',
-        run: () =>
-          tryHuggingFaceInferenceVideo({
-            hfToken: resolvedHfToken,
-            modelId: 'Wan-AI/Wan2.1-T2V-14B',
-            provider: 'auto',
-            label: 'Wan-AI/Wan2.1-T2V-14B',
-            prompt,
-            negativePrompt: resolvedNegativePrompt,
-            mode,
-            aspectRatio,
-            timeoutMs: remainingBudget(),
-            onProgress: progressCb,
-            isAborted,
-          }),
-      });
-
-      attempts.push({
-        badge: 'Rendered via HF Inference (CogVideoX-5b)',
-        run: () =>
-          tryHuggingFaceInferenceVideo({
-            hfToken: resolvedHfToken,
-            modelId: 'zai-org/CogVideoX-5b',
-            provider: 'auto',
-            label: 'zai-org/CogVideoX-5b',
-            prompt,
-            negativePrompt: resolvedNegativePrompt,
-            mode,
-            aspectRatio,
-            timeoutMs: remainingBudget(),
-            onProgress: progressCb,
-            isAborted,
-          }),
-      });
-
-      attempts.push({
-        badge: 'Rendered via HF Inference (LTX-Video)',
-        run: () =>
-          tryHuggingFaceInferenceVideo({
-            hfToken: resolvedHfToken,
-            modelId: 'Lightricks/LTX-Video-0.9.5',
-            provider: 'auto',
-            label: 'Lightricks/LTX-Video-0.9.5',
-            prompt,
-            negativePrompt: resolvedNegativePrompt,
-            mode,
-            aspectRatio,
-            timeoutMs: remainingBudget(),
-            onProgress: progressCb,
-            isAborted,
+            onProgress: raceProgressCb,
+            isAborted: raceAborted,
           }),
       });
     }
   }
 
-  // PRIORITY 3: Agnes AI (Agnes-Video-2.5) when configured
-  if (resolvedAgnesKey) {
-    attempts.push({
-      badge: 'Rendered via Agnes AI (Agnes-Video-2.5)',
-      run: () =>
-        tryAgnesAiVideo({
-          apiKey: resolvedAgnesKey,
-          prompt,
-          mode,
-          aspectRatio,
-          duration,
-          imageDataUrl,
-          timeoutMs: remainingBudget(),
-          onProgress: progressCb,
-          isAborted,
-        }),
+  let lastReason = 'Real Text-to-Video APIs are currently unavailable or busy';
+
+  // Phase 1: Ultra-Fast Parallel Race across all active key-backed REST video engines
+  if (parallelRestRacers.length > 0 && !isAborted?.()) {
+    onEvent({
+      type: 'progress',
+      percent: 16,
+      message: `0ms key check complete — racing ${parallelRestRacers.map((r) => r.name).join(', ')}...`,
+    });
+
+    try {
+      const winner = await withTimeout(
+        Promise.any(
+          parallelRestRacers.map(async (racer) => {
+            const res = await racer.run();
+            return {
+              ...res,
+              finalBadge: res.badgeOverride || racer.badge,
+            };
+          })
+        ),
+        Math.min(46000, remainingBudget()),
+        'Parallel video engine race'
+      );
+      raceWon = true;
+      if (isAborted?.()) return;
+
+      storeCachedRenderedVideo(cacheKey, {
+        buffer: winner.buffer,
+        mimeType: winner.mimeType,
+        width: winner.width,
+        height: winner.height,
+        providerLabel: winner.finalBadge,
+      });
+
+      const fileId = storeCachedHfVideo(winner.buffer, winner.mimeType);
+      onEvent({
+        type: 'done',
+        percent: 100,
+        message: `${winner.finalBadge}!`,
+        providerLabel: winner.finalBadge,
+        videoApiPath: `/api/hf-video-file/${fileId}`,
+        mimeType: winner.mimeType,
+        width: winner.width,
+        height: winner.height,
+      });
+      return;
+    } catch (err) {
+      raceWon = true;
+      if (err instanceof AggregateError && err.errors.length > 0) {
+        const firstErr = err.errors[0];
+        lastReason = firstErr instanceof Error ? firstErr.message : lastReason;
+      } else if (err instanceof Error) {
+        lastReason = err.message;
+      }
+      if (!isAborted?.()) {
+        onEvent({
+          type: 'progress',
+          percent: 38,
+          message: `Active REST race busy (${lastReason}) — switching to fallback video engines...`,
+        });
+      }
+    }
+  } else {
+    onEvent({
+      type: 'progress',
+      percent: 16,
+      message: '0ms key check complete — routing directly to free GPU fallback...',
     });
   }
 
-  // PRIORITY 4: Fal.ai Video API (Wan 2.1 / Minimax) when configured
-  if (resolvedFalKey) {
+  // Phase 2: Sequential fallback across extra HF Inference models, Google Veo, Live Gradio GPUs, and Pollinations
+  const attempts: Array<{
+    badge: string;
+    run: () => Promise<VideoAttemptResult>;
+  }> = [];
+
+  if (resolvedHfToken && mode !== 'image-to-video') {
     attempts.push({
-      badge: 'Rendered via Fal.ai Video',
+      badge: 'Rendered via HF Inference (Wan2.1-14B)',
       run: () =>
-        tryFalAiVideo({
-          apiKey: resolvedFalKey,
+        tryHuggingFaceInferenceVideo({
+          hfToken: resolvedHfToken,
+          modelId: 'Wan-AI/Wan2.1-T2V-14B',
+          provider: 'auto',
+          label: 'Wan-AI/Wan2.1-T2V-14B',
           prompt,
           negativePrompt: resolvedNegativePrompt,
           mode,
           aspectRatio,
-          imageDataUrl,
           timeoutMs: remainingBudget(),
           onProgress: progressCb,
           isAborted,
         }),
     });
-  }
 
-  // PRIORITY 5: Replicate API (wan-video/wan-2.1-t2v-480p / i2v-480p) when configured
-  if (resolvedReplicateToken) {
     attempts.push({
-      badge: 'Rendered via Replicate Wan 2.1',
+      badge: 'Rendered via HF Inference (CogVideoX-5b)',
       run: () =>
-        tryReplicateVideo({
-          apiKey: resolvedReplicateToken,
+        tryHuggingFaceInferenceVideo({
+          hfToken: resolvedHfToken,
+          modelId: 'zai-org/CogVideoX-5b',
+          provider: 'auto',
+          label: 'zai-org/CogVideoX-5b',
           prompt,
           negativePrompt: resolvedNegativePrompt,
           mode,
           aspectRatio,
-          imageDataUrl,
+          timeoutMs: remainingBudget(),
+          onProgress: progressCb,
+          isAborted,
+        }),
+    });
+
+    attempts.push({
+      badge: 'Rendered via HF Inference (LTX-Video)',
+      run: () =>
+        tryHuggingFaceInferenceVideo({
+          hfToken: resolvedHfToken,
+          modelId: 'Lightricks/LTX-Video-0.9.5',
+          provider: 'auto',
+          label: 'Lightricks/LTX-Video-0.9.5',
+          prompt,
+          negativePrompt: resolvedNegativePrompt,
+          mode,
+          aspectRatio,
           timeoutMs: remainingBudget(),
           onProgress: progressCb,
           isAborted,
@@ -1484,7 +1932,6 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 6: Google Veo 2.0 (veo-2.0-generate-001) when configured
   if (resolvedGeminiKey) {
     attempts.push({
       badge: 'Rendered via Google Veo',
@@ -1501,7 +1948,9 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 4: Live Hugging Face Gradio GPUs (Real Text-to-Video & Image-to-Video MP4)
+  const fixedSeed = typeof seed === 'number' ? seed : Math.floor(Math.random() * 1000000);
+  const randomizeSeed = typeof seed !== 'number';
+
   if (mode === 'image-to-video' && imageBlob) {
     attempts.push({
       badge: 'Rendered via LTX-Video GPU',
@@ -1526,8 +1975,8 @@ export async function generateSmartMultiEngineVideo(params: {
             mode: 'image-to-video',
             duration_ui: 5,
             ui_frames_to_use: 9,
-            seed_ui: Math.floor(Math.random() * 1000000),
-            randomize_seed: true,
+            seed_ui: fixedSeed,
+            randomize_seed: randomizeSeed,
             ui_guidance_scale: 1,
             improve_texture_flag: false,
           },
@@ -1560,8 +2009,8 @@ export async function generateSmartMultiEngineVideo(params: {
             duration_seconds: 5,
             guidance_scale: 1,
             steps: 4,
-            seed: Math.floor(Math.random() * 1000000),
-            randomize_seed: true,
+            seed: fixedSeed,
+            randomize_seed: randomizeSeed,
           },
           hfToken: resolvedHfToken,
           connectTimeoutMs: 7000,
@@ -1583,8 +2032,8 @@ export async function generateSmartMultiEngineVideo(params: {
           endpoint: '/video',
           payload: {
             image: handle_file(imageBlob),
-            seed: Math.floor(Math.random() * 1000000),
-            randomize_seed: true,
+            seed: fixedSeed,
+            randomize_seed: randomizeSeed,
             motion_bucket_id: 127,
             fps_id: 16,
           },
@@ -1616,8 +2065,8 @@ export async function generateSmartMultiEngineVideo(params: {
             mode: 'text-to-video',
             duration_ui: 5,
             ui_frames_to_use: 9,
-            seed_ui: Math.floor(Math.random() * 1000000),
-            randomize_seed: true,
+            seed_ui: fixedSeed,
+            randomize_seed: randomizeSeed,
             ui_guidance_scale: 1,
             improve_texture_flag: false,
           },
@@ -1655,7 +2104,6 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  // PRIORITY 5: Pollinations.ai Video API only if key is configured and real HF/SiliconFlow/Veo APIs failed
   if (resolvedPollinationsKey) {
     attempts.push({
       badge: 'Rendered via Pollinations.ai Video',
@@ -1680,8 +2128,6 @@ export async function generateSmartMultiEngineVideo(params: {
     });
   }
 
-  let lastReason = 'Real Text-to-Video APIs are currently unavailable or busy';
-
   for (let i = 0; i < attempts.length; i += 1) {
     if (isAborted?.()) return;
     if (Date.now() > cloudRouterDeadline - 2000) {
@@ -1693,6 +2139,13 @@ export async function generateSmartMultiEngineVideo(params: {
       const result = await withTimeout(attempt.run(), remainingBudget(), attempt.badge);
       if (isAborted?.()) return;
       const finalBadge = result.badgeOverride || attempt.badge;
+      storeCachedRenderedVideo(cacheKey, {
+        buffer: result.buffer,
+        mimeType: result.mimeType,
+        width: result.width,
+        height: result.height,
+        providerLabel: finalBadge,
+      });
       const fileId = storeCachedHfVideo(result.buffer, result.mimeType);
       onEvent({
         type: 'done',
@@ -1710,7 +2163,7 @@ export async function generateSmartMultiEngineVideo(params: {
       if (i + 1 < attempts.length && Date.now() <= cloudRouterDeadline - 3000 && !isAborted?.()) {
         onEvent({
           type: 'progress',
-          percent: Math.min(54, 20 + i * 7),
+          percent: Math.min(54, 24 + i * 7),
           message: `${lastReason} — trying next real Text-to-Video model...`,
         });
       }
@@ -1844,7 +2297,8 @@ async function tryReplicateLipSync(params: {
     if (isAborted?.()) throw new Error('Aborted');
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     onProgress(Math.min(84, 58 + elapsedSec), 'Syncing portrait lips via Replicate SadTalker...');
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) throw new Error('Aborted');
 
     const pollUrl =
       pred.urls?.get || (pred.id ? `https://api.replicate.com/v1/predictions/${pred.id}` : '');
@@ -1874,20 +2328,212 @@ async function tryReplicateLipSync(params: {
   throw new Error(pred.error || 'Replicate SadTalker did not complete');
 }
 
+async function tryDigenAiLipSync(params: {
+  apiKey: string;
+  imageDataUrl: string;
+  audioDataUrl: string;
+  onProgress: (percent: number, message: string) => void;
+  isAborted?: () => boolean;
+}): Promise<{ buffer: Buffer; mimeType: string }> {
+  const { apiKey, imageDataUrl, audioDataUrl, onProgress, isAborted } = params;
+  const trimmedKey = apiKey.trim();
+  if (!trimmedKey) {
+    throw new Error('Digen AI API key is missing');
+  }
+
+  onProgress(24, 'Routing portrait + audio to Digen AI Talking Avatar...');
+
+  const avatarEndpoints = [
+    'https://api.digen.ai/v2/avatar/generate',
+    'https://api.digen.ai/v1/avatar/generate',
+    'https://api.digen.ai/v1/lip-sync/generate',
+  ];
+
+  let created: Record<string, unknown> | null = null;
+  let lastError = 'Digen AI avatar lip-sync endpoint unavailable';
+
+  for (const endpoint of avatarEndpoints) {
+    if (isAborted?.()) throw new Error('Aborted');
+    try {
+      const submitRes = await withTimeout(
+        fetch(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${trimmedKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            image_url: imageDataUrl,
+            audio_url: audioDataUrl,
+            source_image: imageDataUrl,
+            driven_audio: audioDataUrl,
+          }),
+        }),
+        12000,
+        'Digen AI Avatar submit'
+      );
+
+      if (!submitRes.ok) {
+        let detail = '';
+        try {
+          const errJson = (await submitRes.json()) as {
+            error?: { message?: string } | string;
+            message?: string;
+            detail?: string;
+          };
+          detail =
+            typeof errJson.error === 'string'
+              ? errJson.error
+              : errJson.error?.message || errJson.message || errJson.detail || '';
+        } catch {
+          // Ignore parse failure
+        }
+
+        if (submitRes.status === 401 || submitRes.status === 403) {
+          throw new Error(detail || 'Digen AI API key unauthorized — switching to next lip-sync engine');
+        }
+        if (submitRes.status === 402) {
+          throw new Error(detail || 'Digen AI credits exhausted — switching to next lip-sync engine');
+        }
+        if (submitRes.status === 429) {
+          throw new Error(detail || 'Digen AI rate limit reached — switching to next lip-sync engine');
+        }
+        lastError = detail || `Digen AI Avatar HTTP ${submitRes.status}`;
+        continue;
+      }
+
+      created = (await submitRes.json()) as Record<string, unknown>;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Digen AI Avatar request failed';
+      if (
+        msg.includes('unauthorized') ||
+        msg.includes('credits exhausted') ||
+        msg.includes('rate limit')
+      ) {
+        throw err;
+      }
+      lastError = msg;
+    }
+  }
+
+  if (!created) {
+    throw new Error(lastError);
+  }
+
+  const createdData =
+    created.data && typeof created.data === 'object'
+      ? (created.data as Record<string, unknown>)
+      : undefined;
+  const immediateUrl =
+    (typeof created.video_url === 'string' && created.video_url) ||
+    (typeof created.url === 'string' && created.url) ||
+    (typeof createdData?.video_url === 'string' && createdData.video_url) ||
+    (typeof createdData?.url === 'string' && createdData.url) ||
+    '';
+
+  if (immediateUrl && isSafeExternalHttpsUrl(immediateUrl)) {
+    onProgress(90, 'Downloading Talking Avatar MP4 from Digen AI...');
+    return downloadVideoBuffer(immediateUrl, undefined, 'Digen AI Avatar');
+  }
+
+  const taskId = String(
+    created.task_id ||
+      created.job_id ||
+      created.video_id ||
+      created.id ||
+      createdData?.task_id ||
+      createdData?.job_id ||
+      createdData?.id ||
+      ''
+  ).trim();
+
+  if (!taskId) {
+    throw new Error('Digen AI Avatar did not return a video URL or task ID');
+  }
+
+  const pollEndpoints = [
+    `https://api.digen.ai/v2/avatar/status/${encodeURIComponent(taskId)}`,
+    `https://api.digen.ai/v1/avatar/status?task_id=${encodeURIComponent(taskId)}`,
+    `https://api.digen.ai/v1/tasks/${encodeURIComponent(taskId)}`,
+  ];
+
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < 35000) {
+    if (isAborted?.()) throw new Error('Aborted');
+    const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    onProgress(Math.min(84, 42 + elapsedSec), 'Syncing talking avatar lips via Digen AI...');
+    await new Promise((r) => setTimeout(r, 1500));
+    if (isAborted?.()) throw new Error('Aborted');
+
+    let statusJson: Record<string, unknown> | null = null;
+    for (const pollUrl of pollEndpoints) {
+      try {
+        const pollRes = await withTimeout(
+          fetch(pollUrl, { headers: { Authorization: `Bearer ${trimmedKey}` } }),
+          8000,
+          'Digen AI Avatar status'
+        );
+        if (pollRes.status === 404) continue;
+        if (!pollRes.ok) throw new Error(`Digen AI Avatar status HTTP ${pollRes.status}`);
+        statusJson = (await pollRes.json()) as Record<string, unknown>;
+        break;
+      } catch (err) {
+        if (pollUrl === pollEndpoints[pollEndpoints.length - 1]) {
+          throw err;
+        }
+      }
+    }
+
+    if (!statusJson) continue;
+    const dataObj =
+      statusJson.data && typeof statusJson.data === 'object'
+        ? (statusJson.data as Record<string, unknown>)
+        : undefined;
+    const statusText = String(statusJson.status || dataObj?.status || '').toLowerCase();
+    const outUrl =
+      (typeof statusJson.video_url === 'string' && statusJson.video_url) ||
+      (typeof statusJson.url === 'string' && statusJson.url) ||
+      (typeof dataObj?.video_url === 'string' && dataObj.video_url) ||
+      (typeof dataObj?.url === 'string' && dataObj.url) ||
+      '';
+
+    if (outUrl && isSafeExternalHttpsUrl(outUrl)) {
+      onProgress(90, 'Downloading Talking Avatar MP4 from Digen AI...');
+      return downloadVideoBuffer(outUrl, undefined, 'Digen AI Avatar');
+    }
+
+    if (statusText === 'failed' || statusText === 'error' || statusText === 'canceled' || statusText === 'cancelled') {
+      throw new Error(
+        typeof statusJson.message === 'string' ? statusJson.message : 'Digen AI Avatar job failed'
+      );
+    }
+  }
+
+  throw new Error('Digen AI Avatar generation timed out');
+}
+
 export async function generateLipSyncVideo(params: {
   imageDataUrl: string;
   audioDataUrl: string;
   hfToken?: string;
   replicateToken?: string;
+  digenKey?: string;
   onEvent: (event: HfProgressEvent) => void;
   isAborted?: () => boolean;
 }): Promise<void> {
-  const { imageDataUrl, audioDataUrl, hfToken, replicateToken, onEvent, isAborted } = params;
+  const { imageDataUrl, audioDataUrl, hfToken, replicateToken, digenKey, onEvent, isAborted } = params;
   const resolvedHfToken = (hfToken?.trim() || process.env.VITE_HF_TOKEN || '').trim();
   const resolvedReplicateToken = (
     replicateToken?.trim() ||
     process.env.VITE_REPLICATE_API_TOKEN ||
     process.env.REPLICATE_API_TOKEN ||
+    ''
+  ).trim();
+  const resolvedDigenKey = (
+    digenKey?.trim() ||
+    process.env.VITE_DIGEN_API_KEY ||
+    process.env.DIGEN_API_KEY ||
     ''
   ).trim();
 
@@ -1908,6 +2554,38 @@ export async function generateLipSyncVideo(params: {
     }
   };
 
+  let lastReason = 'Lip-Sync cloud queues busy';
+
+  if (resolvedDigenKey && !isAborted?.()) {
+    try {
+      const digenRes = await tryDigenAiLipSync({
+        apiKey: resolvedDigenKey,
+        imageDataUrl,
+        audioDataUrl,
+        onProgress: progressCb,
+        isAborted,
+      });
+      if (isAborted?.()) return;
+      const fileId = storeCachedHfVideo(digenRes.buffer, digenRes.mimeType);
+      onEvent({
+        type: 'done',
+        percent: 100,
+        message: 'Lip-synced talking avatar ready via Digen AI!',
+        providerLabel: 'Rendered via Digen AI Avatar',
+        videoApiPath: `/api/hf-video-file/${fileId}`,
+        mimeType: digenRes.mimeType,
+        width: 512,
+        height: 512,
+      });
+      return;
+    } catch (err) {
+      lastReason = err instanceof Error ? err.message : lastReason;
+      if (!isAborted?.()) {
+        progressCb(28, `${lastReason} — trying next lip-sync GPU...`);
+      }
+    }
+  }
+
   const spaces = [
     { spaceId: 'fffiloni/SadTalker', label: 'SadTalker Lip-Sync GPU' },
     { spaceId: 'vinthony/SadTalker', label: 'SadTalker v2 GPU' },
@@ -1915,7 +2593,6 @@ export async function generateLipSyncVideo(params: {
     { spaceId: 'camenduru/Wav2Lip', label: 'Wav2Lip Sync GPU' },
   ];
 
-  let lastReason = 'Lip-Sync cloud queues busy';
   const lipSyncDeadline = Date.now() + 26000;
 
   for (let i = 0; i < spaces.length; i += 1) {

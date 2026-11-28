@@ -41,6 +41,7 @@ export interface UIStrings {
   navTextToVideo: string;
   navImageToVideo: string;
   navLipSync: string;
+  navFilmDirector: string;
   navTextToImage: string;
   navLifetimeFree: string;
   navMyCreations: string;
@@ -96,6 +97,7 @@ const EN: UIStrings = {
   navTextToVideo: 'Text to Video (15s Auto)',
   navImageToVideo: 'Image to Video',
   navLipSync: 'AI Lip-Sync / Singing Photo',
+  navFilmDirector: 'Film Director',
   navTextToImage: 'Text to Image',
   navLifetimeFree: 'Lifetime Free',
   navMyCreations: 'My Creations',

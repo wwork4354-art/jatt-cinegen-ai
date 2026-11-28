@@ -8,6 +8,7 @@ import { ShareModal } from './components/ShareModal';
 import { DeveloperFooter } from './components/DeveloperFooter';
 import { EngineVaultModal } from './components/EngineVaultModal';
 import { JattLifetimeStudio } from './components/JattLifetimeStudio';
+import { FilmDirectorPanel } from './components/FilmDirectorPanel';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import {
   runDirectBrowserAiVideo,
@@ -18,17 +19,28 @@ import {
   generateLifetimeFreeImage,
   renderLifetimeFreeVideo,
 } from './lib/lifetimeFreeEngine';
+import { renderFilmDirectorSequence } from './lib/filmDirectorEngine';
+import { compressAudioPayloadIfNeeded, compressImageDataUrl } from './lib/payloadCompressor';
 import { renderAnimatedPollinationsFallback } from './lib/animatedPollinationsFallback';
 import { enhanceTextToVideoPromptFraming } from '../shared/videoPromptFraming';
+import {
+  applyCharacterConsistencyLock,
+  deriveSeedFromText,
+} from '../shared/characterConsistency';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
 import { getVoiceLanguageById, translatePromptToEnglish } from './lib/voiceLanguages';
 import {
   type AspectRatio,
   type CameraMotionId,
+  type CharacterFaceLockConfig,
   type CreationItem,
   type DeveloperProfile,
   type EngineVaultKeys,
+  type FilmAmbienceMood,
+  type FilmCharacter,
+  type FilmDialogueShot,
+  type FilmTransitionStyle,
   type GenerationProgress,
   type LifetimeCaptionStyle,
   type LifetimeKeyframeSource,
@@ -47,6 +59,7 @@ const HF_TOKEN_STORAGE_KEY = 'jatt_cinegen_hf_token';
 const ENGINE_VAULT_STORAGE_KEY = 'jatt_cinegen_engine_vault';
 const LANGUAGE_STORAGE_KEY = 'jatt_cinegen_language';
 const DEV_PROFILE_STORAGE_KEY = 'jatt_cinegen_developer_profile';
+const CHARACTER_LOCK_STORAGE_KEY = 'jatt_cinegen_character_lock';
 const DEFAULT_CREATOR_AVATAR = '/creator-avatar.png';
 
 const DEFAULT_DEV_PROFILE: DeveloperProfile = {
@@ -109,6 +122,7 @@ export default function App() {
   const envTogether = (import.meta.env.VITE_TOGETHER_API_KEY as string | undefined) ?? '';
   const envGroq = (import.meta.env.VITE_GROQ_API_KEY as string | undefined) ?? '';
   const envOpenRouter = (import.meta.env.VITE_OPENROUTER_API_KEY as string | undefined) ?? '';
+  const envDigen = (import.meta.env.VITE_DIGEN_API_KEY as string | undefined) ?? '';
 
   const [hfToken, setHfToken] = useState<string>(() => {
     try {
@@ -127,6 +141,7 @@ export default function App() {
           hfToken: parsed.hfToken || localStorage.getItem(HF_TOKEN_STORAGE_KEY) || envHf,
           siliconFlowKey: parsed.siliconFlowKey || envSf,
           pollinationsKey: parsed.pollinationsKey || envPollinations,
+          digenKey: parsed.digenKey || envDigen,
           agnesKey: parsed.agnesKey || envAgnes,
           falKey: parsed.falKey || envFal,
           replicateToken: parsed.replicateToken || envReplicate,
@@ -143,6 +158,7 @@ export default function App() {
       hfToken: envHf,
       siliconFlowKey: envSf,
       pollinationsKey: envPollinations,
+      digenKey: envDigen,
       agnesKey: envAgnes,
       falKey: envFal,
       replicateToken: envReplicate,
@@ -166,6 +182,75 @@ export default function App() {
   const [lifetimeKeyframeSource, setLifetimeKeyframeSource] =
     useState<LifetimeKeyframeSource>('ai-pollinations');
   const [lifetimeOfflineImageMode, setLifetimeOfflineImageMode] = useState(false);
+  const [characterFaceLock, setCharacterFaceLock] = useState<CharacterFaceLockConfig>(() => {
+    try {
+      const saved = localStorage.getItem(CHARACTER_LOCK_STORAGE_KEY);
+      if (saved) {
+        const parsed = JSON.parse(saved) as Partial<CharacterFaceLockConfig>;
+        return {
+          enabled: Boolean(parsed.enabled),
+          characterName: parsed.characterName ?? 'Hero Character',
+          traitsPrompt: parsed.traitsPrompt ?? '',
+          fixedSeed: Number(parsed.fixedSeed) > 0 ? Number(parsed.fixedSeed) : 104277,
+          referenceImageDataUrl: parsed.referenceImageDataUrl ?? null,
+        };
+      }
+    } catch {
+      // Ignore storage parse error
+    }
+    return {
+      enabled: false,
+      characterName: 'Hero Character',
+      traitsPrompt: '',
+      fixedSeed: 104277,
+      referenceImageDataUrl: null,
+    };
+  });
+
+  const [filmSceneSetting, setFilmSceneSetting] = useState(
+    'Rain-soaked neon street outside a Lahore tea stall at night, warm lanterns'
+  );
+  const [filmCharacters, setFilmCharacters] = useState<FilmCharacter[]>(() => [
+    {
+      id: 'char-default-1',
+      name: 'Hamza',
+      appearancePrompt: 'handsome young man in dark leather jacket, intense expressive eyes',
+      portraitDataUrl: null,
+      gender: 'male',
+      ageTone: 'adult',
+      languageId: 'ur',
+      seed: deriveSeedFromText('Hamza-leather-jacket'),
+    },
+    {
+      id: 'char-default-2',
+      name: 'Ayesha',
+      appearancePrompt: 'graceful young woman in emerald shawl, warm studio rim lighting',
+      portraitDataUrl: null,
+      gender: 'female',
+      ageTone: 'adult',
+      languageId: 'ur',
+      seed: deriveSeedFromText('Ayesha-emerald-shawl'),
+    },
+  ]);
+  const [filmShots, setFilmShots] = useState<FilmDialogueShot[]>([
+    {
+      id: 'shot-default-1',
+      characterId: 'char-default-1',
+      dialogue: 'تم نے مجھ سے وعدہ کیا تھا کہ تم سچ بتاؤ گی۔',
+      sceneAction: 'Hamza speaks firmly facing camera',
+    },
+    {
+      id: 'shot-default-2',
+      characterId: 'char-default-2',
+      dialogue: 'میں نے سب کچھ تمہاری حفاظت کے لیے چھپایا تھا۔',
+      sceneAction: 'Ayesha replies calmly with emotional expression',
+    },
+  ]);
+  const [filmShowSubtitles, setFilmShowSubtitles] = useState(true);
+  const [filmTransition, setFilmTransition] = useState<FilmTransitionStyle>('crossfade');
+  const [filmAmbience, setFilmAmbience] = useState<FilmAmbienceMood>('cinema-drama');
+  const [filmTryCloudLipSync, setFilmTryCloudLipSync] = useState(false);
+
   const [developerProfile, setDeveloperProfile] = useState<DeveloperProfile>(() => {
     try {
       const saved = localStorage.getItem(DEV_PROFILE_STORAGE_KEY);
@@ -264,6 +349,22 @@ export default function App() {
     }
   }, [developerProfile]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(CHARACTER_LOCK_STORAGE_KEY, JSON.stringify(characterFaceLock));
+    } catch {
+      // Ignore storage quota errors if large data URL exceeds quota
+      try {
+        localStorage.setItem(
+          CHARACTER_LOCK_STORAGE_KEY,
+          JSON.stringify({ ...characterFaceLock, referenceImageDataUrl: null })
+        );
+      } catch {
+        // Ignore
+      }
+    }
+  }, [characterFaceLock]);
+
   const stopTimer = useCallback(() => {
     if (timerRef.current !== null) {
       window.clearInterval(timerRef.current);
@@ -320,7 +421,8 @@ export default function App() {
 
     setIsEnhancing(true);
     setErrorMessage(null);
-    const mode = activeTab === 'creations' ? 'text-to-video' : activeTab;
+    const mode =
+      activeTab === 'creations' || activeTab === 'film-director' ? 'text-to-video' : activeTab;
     const activeGeminiKey = (engineVaultKeys.geminiKey || envGemini).trim();
     const activeGroqKey = (engineVaultKeys.groqKey || envGroq).trim();
     const activeOpenRouterKey = (engineVaultKeys.openRouterKey || envOpenRouter).trim();
@@ -450,6 +552,7 @@ export default function App() {
     setErrorMessage(null);
     const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
     const activeReplicateToken = (engineVaultKeys.replicateToken || envReplicate).trim();
+    const activeDigenKey = (engineVaultKeys.digenKey || envDigen).trim();
     const activeVoice = getVoiceLanguageById(voiceLanguageId);
     const displayLabel =
       lipSyncAudioMode === 'upload' && lipSyncAudioFile
@@ -464,13 +567,15 @@ export default function App() {
         const fetched = await fetch(uploadedImageUrl);
         imagePayload = await blobToDataUrl(await fetched.blob());
       }
+      imagePayload = await compressImageDataUrl(imagePayload, 896, 0.84);
 
       let audioBlob: Blob | null = null;
       let audioDataUrl: string | null = null;
 
       if (lipSyncAudioMode === 'upload' && lipSyncAudioFile) {
-        audioBlob = lipSyncAudioFile;
-        audioDataUrl = await blobToDataUrl(lipSyncAudioFile);
+        const compressedAudio = await compressAudioPayloadIfNeeded(lipSyncAudioFile, 1_500_000);
+        audioBlob = compressedAudio.blob;
+        audioDataUrl = compressedAudio.dataUrl;
       } else if (trimmedDialogue) {
         setProgress((p) =>
           p.active
@@ -493,8 +598,10 @@ export default function App() {
           if (ttsRes.ok) {
             const ttsData = (await ttsRes.json()) as { audioDataUrl?: string };
             if (ttsData.audioDataUrl) {
-              audioDataUrl = ttsData.audioDataUrl;
-              audioBlob = dataUrlToBlob(ttsData.audioDataUrl);
+              const rawBlob = dataUrlToBlob(ttsData.audioDataUrl);
+              const compressedAudio = await compressAudioPayloadIfNeeded(rawBlob, 1_500_000);
+              audioBlob = compressedAudio.blob;
+              audioDataUrl = compressedAudio.dataUrl;
             }
           }
         } catch {
@@ -518,6 +625,7 @@ export default function App() {
               audioDataUrl,
               hfToken: activeHfToken || undefined,
               replicateToken: activeReplicateToken || undefined,
+              digenKey: activeDigenKey || undefined,
             }),
           });
 
@@ -623,6 +731,7 @@ export default function App() {
             audioDataUrl: audioDataUrl || undefined,
             hfToken: activeHfToken,
             replicateToken: activeReplicateToken,
+            digenKey: activeDigenKey,
             onProgress: (percent, statusMessage) => {
               setProgress((p) =>
                 p.active ? { ...p, percent, statusMessage } : p
@@ -743,6 +852,7 @@ export default function App() {
     const activeAgnesKey = (engineVaultKeys.agnesKey || envAgnes).trim();
     const activeFalKey = (engineVaultKeys.falKey || envFal).trim();
     const activeReplicateToken = (engineVaultKeys.replicateToken || envReplicate).trim();
+    const activeDigenKey = (engineVaultKeys.digenKey || envDigen).trim();
 
     startTimer(
       targetMode === 'image-to-video'
@@ -766,14 +876,28 @@ export default function App() {
         }
       );
       const translatedBase = englishPrompt || trimmedPrompt;
+      const { resolvedPrompt: lockedBasePrompt, seed: lockedSeed } =
+        applyCharacterConsistencyLock(translatedBase, characterFaceLock);
       const effectivePrompt =
         targetMode === 'text-to-video'
-          ? enhanceTextToVideoPromptFraming(translatedBase)
-          : translatedBase;
+          ? enhanceTextToVideoPromptFraming(lockedBasePrompt)
+          : lockedBasePrompt;
 
-      if (targetMode === 'image-to-video' && uploadedImageUrl?.startsWith('blob:')) {
-        const fetched = await fetch(uploadedImageUrl);
-        imagePayload = await blobToDataUrl(await fetched.blob());
+      if (
+        targetMode === 'image-to-video' &&
+        !imagePayload &&
+        characterFaceLock.enabled &&
+        characterFaceLock.referenceImageDataUrl
+      ) {
+        imagePayload = characterFaceLock.referenceImageDataUrl;
+      }
+
+      if (targetMode === 'image-to-video' && imagePayload) {
+        if (imagePayload.startsWith('blob:')) {
+          const fetched = await fetch(imagePayload);
+          imagePayload = await blobToDataUrl(await fetched.blob());
+        }
+        imagePayload = await compressImageDataUrl(imagePayload, 1024, 0.84);
       }
 
       const hfStreamAbort = new AbortController();
@@ -789,6 +913,7 @@ export default function App() {
             aspectRatio,
             style: stylePreset,
             duration,
+            seed: characterFaceLock.enabled ? lockedSeed : undefined,
             imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
             geminiKey: activeGeminiKey || undefined,
             hfToken: activeHfToken || undefined,
@@ -797,6 +922,7 @@ export default function App() {
             agnesKey: activeAgnesKey || undefined,
             falKey: activeFalKey || undefined,
             replicateToken: activeReplicateToken || undefined,
+            digenKey: activeDigenKey || undefined,
           }),
         });
 
@@ -912,6 +1038,7 @@ export default function App() {
           mode: targetMode,
           aspectRatio,
           duration,
+          seed: characterFaceLock.enabled ? lockedSeed : undefined,
           imageDataUrl: targetMode === 'image-to-video' ? imagePayload : undefined,
           geminiKey: activeGeminiKey,
           hfToken: activeHfToken,
@@ -920,6 +1047,7 @@ export default function App() {
           agnesKey: activeAgnesKey,
           falKey: activeFalKey,
           replicateToken: activeReplicateToken,
+          digenKey: activeDigenKey,
           onProgress: (percent, statusMessage) => {
             setProgress((prev) =>
               prev.active ? { ...prev, percent, statusMessage } : prev
@@ -1167,10 +1295,100 @@ export default function App() {
     }
   };
 
+  const runFilmDirector = async () => {
+    if (progress.active) return;
+    setErrorMessage(null);
+    startTimer('Preparing Multi-Character Film Scene & Cast Voices...');
+
+    const activeTogetherKey = (engineVaultKeys.togetherKey || envTogether).trim();
+    const activeHfToken = (engineVaultKeys.hfToken || hfToken || envHf).trim();
+    const activeReplicateToken = (engineVaultKeys.replicateToken || envReplicate).trim();
+    const activeDigenKey = (engineVaultKeys.digenKey || envDigen).trim();
+
+    try {
+      const rendered = await renderFilmDirectorSequence({
+        sceneSetting: filmSceneSetting,
+        characters: filmCharacters,
+        shots: filmShots,
+        showSubtitles: filmShowSubtitles,
+        transitionStyle: filmTransition,
+        ambienceMood: filmAmbience,
+        tryCloudLipSync: filmTryCloudLipSync,
+        aspectRatio,
+        quality,
+        togetherKey: activeTogetherKey || undefined,
+        hfToken: activeHfToken || undefined,
+        replicateToken: activeReplicateToken || undefined,
+        digenKey: activeDigenKey || undefined,
+        onFrameCanvas: (sourceCanvas) => {
+          setIsLivePreviewActive((prev) => (prev ? prev : true));
+          const target = liveCanvasRef.current;
+          if (!target) return;
+          const maxPreviewSide = 1280;
+          const scale = Math.min(
+            1,
+            maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+          );
+          const previewW = Math.round(sourceCanvas.width * scale);
+          const previewH = Math.round(sourceCanvas.height * scale);
+          if (target.width !== previewW || target.height !== previewH) {
+            target.width = previewW;
+            target.height = previewH;
+          }
+          const tctx = target.getContext('2d');
+          if (tctx) {
+            tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
+          }
+        },
+        onProgress: (percent, statusMessage) => {
+          setProgress((p) => (p.active ? { ...p, percent, statusMessage } : p));
+        },
+      });
+
+      const firstLine =
+        filmShots.find((s) => s.dialogue.trim())?.dialogue.trim() ||
+        'Multi-Character Film Scene';
+      const item: CreationItem = {
+        id: crypto.randomUUID(),
+        kind: 'video',
+        sourceMode: 'film-director',
+        prompt: `${filmSceneSetting ? `${filmSceneSetting} — ` : ''}${firstLine}`,
+        style: stylePreset,
+        aspectRatio,
+        width: rendered.width,
+        height: rendered.height,
+        duration,
+        quality,
+        engineLabel: filmTryCloudLipSync
+          ? 'Film Director · Multi-Cast Lip-Sync (Cloud + Canvas)'
+          : 'Film Director · Multi-Cast Lip-Sync Studio',
+        scenes: rendered.scenes,
+        mediaUrl: rendered.mediaUrl,
+        mimeType: rendered.mimeType,
+        createdAt: Date.now(),
+        blob: rendered.blob,
+      };
+
+      await persistNewCreation(item);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Film dialogue rendering failed.'
+      );
+    } finally {
+      stopTimer();
+      setIsLivePreviewActive(false);
+      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+    }
+  };
+
   const handleGenerate = async () => {
     if (activeTab === 'creations' || progress.active) return;
     if (activeTab === 'lifetime-free') {
       await runLifetimeFreeGeneration();
+      return;
+    }
+    if (activeTab === 'film-director') {
+      await runFilmDirector();
       return;
     }
     const trimmedPrompt = prompt.trim();
@@ -1194,13 +1412,23 @@ export default function App() {
           openRouterKey: (engineVaultKeys.openRouterKey || envOpenRouter).trim() || undefined,
         });
         const activeTogetherKey = (engineVaultKeys.togetherKey || envTogether).trim();
+        const { resolvedPrompt, seed: lockedSeed } = applyCharacterConsistencyLock(
+          englishPrompt || trimmedPrompt,
+          characterFaceLock
+        );
         const result = await fetchFreeAiImageWithWaterfall({
-          prompt: englishPrompt || trimmedPrompt,
+          prompt: resolvedPrompt,
           aspectRatio,
           style: stylePreset,
+          seed: characterFaceLock.enabled ? lockedSeed : undefined,
           togetherKey: activeTogetherKey || undefined,
           onStatus: (msg) => {
-            setProgress((p) => (p.active ? { ...p, percent: 48, statusMessage: msg } : p));
+            setProgress((p) =>
+              p.active ? { ...p, percent: Math.max(p.percent, 48), statusMessage: msg } : p
+            );
+          },
+          onProgress: (percent, msg) => {
+            setProgress((p) => (p.active ? { ...p, percent, statusMessage: msg } : p));
           },
         });
 
@@ -1425,6 +1653,7 @@ export default function App() {
       item.sourceMode === 'text-to-image' ||
       item.sourceMode === 'image-to-video' ||
       item.sourceMode === 'lip-sync' ||
+      item.sourceMode === 'film-director' ||
       item.sourceMode === 'text-to-video' ||
       item.sourceMode === 'lifetime-free'
         ? item.sourceMode
@@ -1476,6 +1705,7 @@ export default function App() {
     (engineVaultKeys.hfToken || hfToken || envHf).trim(),
     (engineVaultKeys.siliconFlowKey || envSf).trim(),
     (engineVaultKeys.pollinationsKey || envPollinations).trim(),
+    (engineVaultKeys.digenKey || envDigen).trim(),
     (engineVaultKeys.agnesKey || envAgnes).trim(),
     (engineVaultKeys.falKey || envFal).trim(),
     (engineVaultKeys.replicateToken || envReplicate).trim(),
@@ -1563,6 +1793,31 @@ export default function App() {
                     isGenerating={progress.active}
                     onGenerate={runLifetimeFreeGeneration}
                   />
+                ) : activeTab === 'film-director' ? (
+                  <FilmDirectorPanel
+                    sceneSetting={filmSceneSetting}
+                    onChangeSceneSetting={setFilmSceneSetting}
+                    characters={filmCharacters}
+                    onChangeCharacters={setFilmCharacters}
+                    shots={filmShots}
+                    onChangeShots={setFilmShots}
+                    showSubtitles={filmShowSubtitles}
+                    onChangeShowSubtitles={setFilmShowSubtitles}
+                    transitionStyle={filmTransition}
+                    onChangeTransitionStyle={setFilmTransition}
+                    ambienceMood={filmAmbience}
+                    onChangeAmbienceMood={setFilmAmbience}
+                    tryCloudLipSync={filmTryCloudLipSync}
+                    onChangeTryCloudLipSync={setFilmTryCloudLipSync}
+                    aspectRatio={aspectRatio}
+                    onChangeAspectRatio={setAspectRatio}
+                    quality={quality}
+                    onChangeQuality={setQuality}
+                    isGenerating={progress.active}
+                    progressPercent={progress.percent}
+                    togetherKey={(engineVaultKeys.togetherKey || envTogether).trim() || undefined}
+                    onRenderFilm={runFilmDirector}
+                  />
                 ) : (
                   <PromptPanel
                     mode={activeTab}
@@ -1603,6 +1858,10 @@ export default function App() {
                       setHfToken(nextToken);
                       setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
                     }}
+                    digenKey={engineVaultKeys.digenKey || envDigen}
+                    onDigenKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, digenKey: nextKey }));
+                    }}
                     agnesApiKey={engineVaultKeys.agnesKey || envAgnes}
                     onAgnesApiKeyChange={(nextKey) => {
                       setEngineVaultKeys((prev) => ({ ...prev, agnesKey: nextKey }));
@@ -1630,6 +1889,7 @@ export default function App() {
                     hasGpuKeys={Boolean(
                       (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
                         (engineVaultKeys.siliconFlowKey || envSf).trim() ||
+                        (engineVaultKeys.digenKey || envDigen).trim() ||
                         (engineVaultKeys.agnesKey || envAgnes).trim() ||
                         (engineVaultKeys.falKey || envFal).trim() ||
                         (engineVaultKeys.replicateToken || envReplicate).trim() ||
@@ -1645,6 +1905,8 @@ export default function App() {
                     lipSyncAudioFile={lipSyncAudioFile}
                     onLipSyncAudioFileChange={setLipSyncAudioFile}
                     recentImages={recentImages}
+                    characterFaceLock={characterFaceLock}
+                    onCharacterFaceLockChange={setCharacterFaceLock}
                     isGenerating={progress.active}
                     onGenerate={handleGenerate}
                   />
@@ -1750,11 +2012,12 @@ export default function App() {
       />
 
       <EngineVaultModal
-        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${engineVaultKeys.pollinationsKey ?? ''}-${engineVaultKeys.agnesKey ?? ''}-${engineVaultKeys.falKey ?? ''}-${engineVaultKeys.replicateToken ?? ''}-${engineVaultKeys.togetherKey ?? ''}-${engineVaultKeys.groqKey ?? ''}-${engineVaultKeys.openRouterKey ?? ''}-${customBackendUrl}`}
+        key={`${isEngineVaultOpen}-${engineVaultKeys.geminiKey}-${engineVaultKeys.hfToken}-${engineVaultKeys.siliconFlowKey}-${engineVaultKeys.pollinationsKey ?? ''}-${engineVaultKeys.digenKey ?? ''}-${engineVaultKeys.agnesKey ?? ''}-${engineVaultKeys.falKey ?? ''}-${engineVaultKeys.replicateToken ?? ''}-${engineVaultKeys.togetherKey ?? ''}-${engineVaultKeys.groqKey ?? ''}-${engineVaultKeys.openRouterKey ?? ''}-${customBackendUrl}`}
         isOpen={isEngineVaultOpen}
         keys={{
           ...engineVaultKeys,
           hfToken: engineVaultKeys.hfToken || hfToken,
+          digenKey: engineVaultKeys.digenKey || envDigen,
           agnesKey: engineVaultKeys.agnesKey || envAgnes,
           falKey: engineVaultKeys.falKey || envFal,
           replicateToken: engineVaultKeys.replicateToken || envReplicate,

@@ -39,6 +39,7 @@ export function EngineVaultModal({
   const [draftHfToken, setDraftHfToken] = useState(keys.hfToken);
   const [draftSiliconFlowKey, setDraftSiliconFlowKey] = useState(keys.siliconFlowKey);
   const [draftPollinationsKey, setDraftPollinationsKey] = useState(keys.pollinationsKey ?? '');
+  const [draftDigenKey, setDraftDigenKey] = useState(keys.digenKey ?? '');
   const [draftAgnesKey, setDraftAgnesKey] = useState(keys.agnesKey ?? '');
   const [draftFalKey, setDraftFalKey] = useState(keys.falKey ?? '');
   const [draftReplicateToken, setDraftReplicateToken] = useState(keys.replicateToken ?? '');
@@ -51,6 +52,7 @@ export function EngineVaultModal({
     | 'hf'
     | 'sf'
     | 'pollinations'
+    | 'digen'
     | 'agnes'
     | 'fal'
     | 'replicate'
@@ -62,22 +64,22 @@ export function EngineVaultModal({
 
   if (!isOpen) return null;
 
+  const buildNextKeys = (): EngineVaultKeys => ({
+    geminiKey: draftGeminiKey.trim(),
+    hfToken: draftHfToken.trim(),
+    siliconFlowKey: draftSiliconFlowKey.trim(),
+    pollinationsKey: draftPollinationsKey.trim(),
+    digenKey: draftDigenKey.trim(),
+    agnesKey: draftAgnesKey.trim(),
+    falKey: draftFalKey.trim(),
+    replicateToken: draftReplicateToken.trim(),
+    togetherKey: draftTogetherKey.trim(),
+    groqKey: draftGroqKey.trim(),
+    openRouterKey: draftOpenRouterKey.trim(),
+  });
+
   const handleSave = () => {
-    onSave(
-      {
-        geminiKey: draftGeminiKey.trim(),
-        hfToken: draftHfToken.trim(),
-        siliconFlowKey: draftSiliconFlowKey.trim(),
-        pollinationsKey: draftPollinationsKey.trim(),
-        agnesKey: draftAgnesKey.trim(),
-        falKey: draftFalKey.trim(),
-        replicateToken: draftReplicateToken.trim(),
-        togetherKey: draftTogetherKey.trim(),
-        groqKey: draftGroqKey.trim(),
-        openRouterKey: draftOpenRouterKey.trim(),
-      },
-      draftBackendUrl.trim()
-    );
+    onSave(buildNextKeys(), draftBackendUrl.trim());
     onClose();
   };
 
@@ -120,8 +122,9 @@ export function EngineVaultModal({
           <ShieldCheck className="h-4 w-4 shrink-0 mt-0.5 text-cyan-400" />
           <div className="space-y-0.5 leading-relaxed">
             <div>
-              Video Router: <strong className="text-white">SiliconFlow</strong> →{' '}
+              Video &amp; Lip-Sync Router: <strong className="text-white">SiliconFlow</strong> →{' '}
               <strong className="text-white">HF Inference</strong> →{' '}
+              <strong className="text-cyan-300">Digen AI</strong> →{' '}
               <strong className="text-white">Agnes AI</strong> →{' '}
               <strong className="text-white">Fal.ai</strong> →{' '}
               <strong className="text-white">Replicate</strong> →{' '}
@@ -284,7 +287,58 @@ export function EngineVaultModal({
             </div>
           </div>
 
-          {/* 5. Agnes AI Free Video Key (VITE_AGNES_API_KEY) */}
+          {/* 5. Digen AI API Key (VITE_DIGEN_API_KEY) */}
+          <div className="space-y-1.5 rounded-xl border border-cyan-400/20 bg-cyan-400/[0.03] p-3">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="vault-digen-key"
+                className="flex items-center gap-1.5 text-xs font-semibold text-slate-200"
+              >
+                <KeyRound className="h-3.5 w-3.5 text-cyan-400" />
+                Digen AI API Key (VITE_DIGEN_API_KEY)
+              </label>
+              <EngineStatusBadge
+                isActive={Boolean(draftDigenKey.trim())}
+                fallbackHint="Video & Talking Avatar"
+              />
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="relative flex flex-1 items-center">
+                <input
+                  id="vault-digen-key"
+                  type={visibleField === 'digen' ? 'text' : 'password'}
+                  value={draftDigenKey}
+                  onChange={(e) => setDraftDigenKey(e.target.value)}
+                  placeholder="digen_... (https://api.digen.ai Video & Lip-Sync)"
+                  autoComplete="off"
+                  className="min-h-[40px] w-full rounded-lg border border-white/10 bg-[#07090E] pl-3 pr-10 py-2 text-xs font-mono text-slate-100 placeholder:text-slate-600 focus:border-cyan-400/70 focus:outline-none focus:ring-2 focus:ring-cyan-400/25"
+                />
+                <button
+                  type="button"
+                  onClick={() =>
+                    setVisibleField((v) => (v === 'digen' ? null : 'digen'))
+                  }
+                  aria-label="Toggle Digen AI key visibility"
+                  className="absolute right-2 rounded p-1 text-slate-400 hover:text-white"
+                >
+                  {visibleField === 'digen' ? (
+                    <EyeOff className="h-3.5 w-3.5" />
+                  ) : (
+                    <Eye className="h-3.5 w-3.5" />
+                  )}
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={() => onSave(buildNextKeys(), draftBackendUrl.trim())}
+                className="min-h-[40px] shrink-0 rounded-lg border border-cyan-400/40 bg-cyan-400/15 px-3 py-2 text-xs font-semibold text-cyan-200 hover:bg-cyan-400/25 transition-colors"
+              >
+                Save
+              </button>
+            </div>
+          </div>
+
+          {/* 6. Agnes AI Free Video Key (VITE_AGNES_API_KEY) */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between gap-2">
               <label
@@ -567,6 +621,7 @@ export function EngineVaultModal({
               setDraftHfToken('');
               setDraftSiliconFlowKey('');
               setDraftPollinationsKey('');
+              setDraftDigenKey('');
               setDraftAgnesKey('');
               setDraftFalKey('');
               setDraftReplicateToken('');

@@ -27,6 +27,7 @@ export function TopNav({
     { id: 'text-to-video', label: strings.navTextToVideo },
     { id: 'image-to-video', label: strings.navImageToVideo },
     { id: 'lip-sync', label: strings.navLipSync },
+    { id: 'film-director', label: strings.navFilmDirector },
     { id: 'text-to-image', label: strings.navTextToImage },
     { id: 'lifetime-free', label: strings.navLifetimeFree },
     { id: 'creations', label: strings.navMyCreations },
@@ -58,7 +59,7 @@ export function TopNav({
         {/* Zone 2: Concise Single-Line Navigation Links */}
         <nav
           aria-label="Studio modes"
-          className="hidden xl:flex items-center gap-4 2xl:gap-5"
+          className="hidden xl:flex items-center gap-3 2xl:gap-4"
         >
           {navItems.map((item) => {
             const isActive = activeTab === item.id;
@@ -73,7 +74,7 @@ export function TopNav({
                 type="button"
                 onClick={() => onSelectTab(item.id)}
                 aria-current={isActive ? 'page' : undefined}
-                className={`relative py-2 text-sm font-medium whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-sm ${
+                className={`relative py-2 text-xs 2xl:text-sm font-medium whitespace-nowrap shrink-0 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 rounded-sm ${
                   isActive ? 'text-cyan-300' : 'text-slate-400 hover:text-slate-100'
                 }`}
               >
