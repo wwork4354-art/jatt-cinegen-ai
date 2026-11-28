@@ -1,18 +1,31 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowDown,
   ArrowUp,
   Clapperboard,
   Loader2,
+  Mic,
+  MicOff,
   Plus,
   Sparkles,
   Trash2,
   Upload,
   UserPlus,
+  Volume2,
+  VolumeX,
 } from 'lucide-react';
 import { deriveSeedFromText } from '../../shared/characterConsistency';
+import {
+  sanitizeUserText,
+  validateMediaUploadFile,
+  validateSafePromptAndScript,
+} from '../../shared/securityShield';
 import { fetchFreeAiImageWithWaterfall } from '../lib/freeImageWaterfall';
-import { VOICE_LANGUAGES } from '../lib/voiceLanguages';
+import { getVoiceLanguageById, VOICE_LANGUAGES } from '../lib/voiceLanguages';
+import {
+  speakVoiceConfirmation,
+  stopVoiceReadback,
+} from '../lib/voiceSpeaker';
 import {
   type AspectRatio,
   type CharacterVoiceAge,
@@ -53,7 +66,15 @@ interface FilmDirectorPanelProps {
   progressPercent: number;
   togetherKey?: string;
   pollinationsKey?: string;
-  onRenderFilm: () => void;
+  groqKey?: string;
+  openRouterKey?: string;
+  voiceAutoGenerate: boolean;
+  onVoiceAutoGenerateChange: (enabled: boolean) => void;
+  voiceReadbackEnabled: boolean;
+  onVoiceReadbackChange: (enabled: boolean) => void;
+  cooldownSeconds: number;
+  onSecurityAlert: (message: string) => void;
+  onRenderFilm: (overrideShots?: FilmDialogueShot[]) => void;
 }
 
 const FILM_PRESETS: Array<{
@@ -182,10 +203,337 @@ export function FilmDirectorPanel({
   isGenerating,
   progressPercent,
   togetherKey,
+  groqKey,
+  openRouterKey,
+  voiceAutoGenerate,
+  onVoiceAutoGenerateChange,
+  voiceReadbackEnabled,
+  onVoiceReadbackChange,
+  cooldownSeconds,
+  onSecurityAlert,
   onRenderFilm,
 }: FilmDirectorPanelProps) {
   const [generatingPortraitFor, setGeneratingPortraitFor] = useState<string | null>(null);
   const fileInputsRef = useRef<Record<string, HTMLInputElement | null>>({});
+
+  // Voice-First Dialogue Dictation State
+  const [activeShotId, setActiveShotId] = useState<string>(() => shots[0]?.id ?? '');
+  const [isListeningDialogue, setIsListeningDialogue] = useState(false);
+  const [isProcessingVoice, setIsProcessingVoice] = useState(false);
+  const [autoRenderCountdown, setAutoRenderCountdown] = useState<number | null>(null);
+  const [filmVoiceNote, setFilmVoiceNote] = useState<string | null>(null);
+  const [filmVoiceError, setFilmVoiceError] = useState<string | null>(null);
+
+  const recognitionRef = useRef<{ stop: () => void } | null>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const chunksRef = useRef<Blob[]>([]);
+  const capturedSpeechRef = useRef('');
+  const shotsRef = useRef(shots);
+  shotsRef.current = shots;
+  const charactersRef = useRef(characters);
+  charactersRef.current = characters;
+  const autoGenTimeoutRef = useRef<number | null>(null);
+  const autoGenIntervalRef = useRef<number | null>(null);
+  const voiceAutoGenRef = useRef(voiceAutoGenerate);
+  voiceAutoGenRef.current = voiceAutoGenerate;
+  const voiceReadbackRef = useRef(voiceReadbackEnabled);
+  voiceReadbackRef.current = voiceReadbackEnabled;
+
+  const resolvedTargetShot = shots.find((s) => s.id === activeShotId) ?? shots[0];
+  const resolvedSpeaker =
+    characters.find((c) => c.id === resolvedTargetShot?.characterId) ?? characters[0];
+  const activeVoiceLang = getVoiceLanguageById(resolvedSpeaker?.languageId || 'ur');
+
+  const clearAutoCountdown = () => {
+    if (autoGenTimeoutRef.current !== null) {
+      window.clearTimeout(autoGenTimeoutRef.current);
+      autoGenTimeoutRef.current = null;
+    }
+    if (autoGenIntervalRef.current !== null) {
+      window.clearInterval(autoGenIntervalRef.current);
+      autoGenIntervalRef.current = null;
+    }
+    setAutoRenderCountdown(null);
+  };
+
+  useEffect(() => {
+    return () => {
+      clearAutoCountdown();
+      stopVoiceReadback();
+      try {
+        recognitionRef.current?.stop();
+      } catch {
+        // Ignore cleanup
+      }
+      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
+        try {
+          recorderRef.current.stop();
+        } catch {
+          // Ignore cleanup
+        }
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
+
+  const finalizeShotVoiceDictation = async (rawSpoken: string) => {
+    const check = validateSafePromptAndScript(rawSpoken, 'Dialogue');
+    if (!check.safe) {
+      const msg = check.reason || 'Blocked unsafe spoken dialogue.';
+      setFilmVoiceError(msg);
+      onSecurityAlert(msg);
+      return;
+    }
+    const cleanSpoken = check.sanitized.trim();
+    if (!cleanSpoken) return;
+
+    const currentShots = shotsRef.current;
+    const targetShot = currentShots.find((s) => s.id === activeShotId) ?? currentShots[0];
+    if (!targetShot) return;
+
+    const targetSpeaker =
+      charactersRef.current.find((c) => c.id === targetShot.characterId) ??
+      charactersRef.current[0];
+    const langId = targetSpeaker?.languageId || 'en';
+
+    setIsProcessingVoice(true);
+    setFilmVoiceNote(`Polishing dialogue line for ${targetSpeaker?.name || 'Actor'}...`);
+    let finalDialogue = cleanSpoken;
+
+    try {
+      const res = await fetch('/api/enhance-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: cleanSpoken,
+          mode: 'lip-sync',
+          groqKey: groqKey?.trim() || undefined,
+          openRouterKey: openRouterKey?.trim() || undefined,
+          togetherKey: togetherKey?.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        const payload = (await res.json()) as { enhancedPrompt?: string };
+        if (payload.enhancedPrompt?.trim()) {
+          finalDialogue = sanitizeUserText(payload.enhancedPrompt.trim());
+        }
+      }
+    } catch {
+      // Keep clean spoken text if offline
+    }
+
+    const updatedShots = currentShots.map((s) =>
+      s.id === targetShot.id ? { ...s, dialogue: finalDialogue } : s
+    );
+    onChangeShots(updatedShots);
+    setIsProcessingVoice(false);
+    setFilmVoiceNote(`Added dialogue to ${targetSpeaker?.name || 'Speaker'}.`);
+
+    if (voiceAutoGenRef.current && !isGenerating) {
+      clearAutoCountdown();
+      setAutoRenderCountdown(2);
+      if (voiceReadbackRef.current) {
+        void speakVoiceConfirmation(langId, 'autoGeneratingIn2s');
+      }
+      let rem = 2;
+      autoGenIntervalRef.current = window.setInterval(() => {
+        rem -= 1;
+        if (rem > 0) setAutoRenderCountdown(rem);
+      }, 1000);
+      autoGenTimeoutRef.current = window.setTimeout(() => {
+        clearAutoCountdown();
+        onRenderFilm(updatedShots);
+      }, 2000);
+    } else if (voiceReadbackRef.current) {
+      void speakVoiceConfirmation(langId, 'promptEnhanced');
+    }
+  };
+
+  const toggleFilmSpeakToCreate = async () => {
+    if (isProcessingVoice || isGenerating) return;
+    clearAutoCountdown();
+    setFilmVoiceError(null);
+    setFilmVoiceNote(null);
+
+    if (isListeningDialogue && recorderRef.current && recorderRef.current.state !== 'inactive') {
+      try {
+        recorderRef.current.stop();
+      } catch {
+        // Ignore stop
+      }
+      return;
+    }
+
+    if (isListeningDialogue && recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop
+      }
+      return;
+    }
+
+    capturedSpeechRef.current = '';
+    if (!voiceReadbackEnabled) {
+      onVoiceReadbackChange(true);
+    }
+    void speakVoiceConfirmation(activeVoiceLang.id, 'filmListeningStart');
+
+    if (groqKey?.trim() && navigator.mediaDevices?.getUserMedia && typeof MediaRecorder !== 'undefined') {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        streamRef.current = stream;
+        chunksRef.current = [];
+        const rec = new MediaRecorder(stream);
+        recorderRef.current = rec;
+        rec.ondataavailable = (ev) => {
+          if (ev.data && ev.data.size > 0) chunksRef.current.push(ev.data);
+        };
+        rec.onstop = async () => {
+          const chunks = chunksRef.current;
+          chunksRef.current = [];
+          streamRef.current?.getTracks().forEach((t) => t.stop());
+          streamRef.current = null;
+          recorderRef.current = null;
+          setIsListeningDialogue(false);
+          if (chunks.length === 0) return;
+
+          setIsProcessingVoice(true);
+          try {
+            const blob = new Blob(chunks, { type: rec.mimeType || 'audio/webm' });
+            const base64Audio = await new Promise<string>((resolve, reject) => {
+              const r = new FileReader();
+              r.onload = () => {
+                const str = String(r.result || '');
+                const idx = str.indexOf(',');
+                resolve(idx >= 0 ? str.slice(idx + 1) : str);
+              };
+              r.onerror = () => reject(new Error('Failed to read audio'));
+              r.readAsDataURL(blob);
+            });
+            const whisperRes = await fetch('/api/transcribe-audio', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                audioBase64: base64Audio,
+                mimeType: blob.type || 'audio/webm',
+                languageCode: activeVoiceLang.translateHintCode.split('-')[0] || 'en',
+                groqKey: groqKey.trim(),
+              }),
+            });
+            const whisperData = (await whisperRes.json()) as { text?: string };
+            setIsProcessingVoice(false);
+            if (whisperData.text?.trim()) {
+              await finalizeShotVoiceDictation(whisperData.text.trim());
+            } else {
+              setFilmVoiceError('No clear speech detected. Please speak again.');
+            }
+          } catch {
+            setIsProcessingVoice(false);
+            setFilmVoiceError('Could not transcribe dialogue recording.');
+          }
+        };
+        rec.start();
+        setIsListeningDialogue(true);
+        setFilmVoiceNote(`Recording ${activeVoiceLang.englishName} dialogue for ${resolvedSpeaker?.name || 'Actor'}...`);
+        return;
+      } catch {
+        setFilmVoiceError('Microphone access denied.');
+        return;
+      }
+    }
+
+    const SpeechRecCtor =
+      (
+        window as unknown as {
+          SpeechRecognition?: new () => {
+            lang: string;
+            continuous: boolean;
+            interimResults: boolean;
+            onresult: ((e: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+            onerror: ((e: { error: string }) => void) | null;
+            onend: (() => void) | null;
+            start: () => void;
+            stop: () => void;
+          };
+          webkitSpeechRecognition?: new () => {
+            lang: string;
+            continuous: boolean;
+            interimResults: boolean;
+            onresult: ((e: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+            onerror: ((e: { error: string }) => void) | null;
+            onend: (() => void) | null;
+            start: () => void;
+            stop: () => void;
+          };
+        }
+      ).SpeechRecognition ||
+      (
+        window as unknown as {
+          webkitSpeechRecognition?: new () => {
+            lang: string;
+            continuous: boolean;
+            interimResults: boolean;
+            onresult: ((e: { resultIndex: number; results: ArrayLike<{ isFinal: boolean; 0: { transcript: string } }> }) => void) | null;
+            onerror: ((e: { error: string }) => void) | null;
+            onend: (() => void) | null;
+            start: () => void;
+            stop: () => void;
+          };
+        }
+      ).webkitSpeechRecognition;
+
+    if (!SpeechRecCtor) {
+      setFilmVoiceError('Speech recognition requires Chrome/Edge/Safari or a Groq Free API Key.');
+      return;
+    }
+
+    try {
+      const rec = new SpeechRecCtor();
+      rec.lang = activeVoiceLang.speechCode;
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.onresult = (event) => {
+        const results = event?.results;
+        if (!results) return;
+        for (let i = Math.max(0, Number(event.resultIndex) || 0); i < results.length; i += 1) {
+          const item = results[i];
+          if (item?.isFinal && item[0]?.transcript) {
+            const safe = sanitizeUserText(item[0].transcript.trim());
+            capturedSpeechRef.current = capturedSpeechRef.current
+              ? `${capturedSpeechRef.current} ${safe}`
+              : safe;
+          }
+        }
+      };
+      rec.onerror = (ev) => {
+        if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+          setFilmVoiceError('Microphone access denied. Please allow permission.');
+        } else if (ev.error !== 'aborted' && ev.error !== 'no-speech') {
+          setFilmVoiceError(`Voice error: ${ev.error}`);
+        }
+        setIsListeningDialogue(false);
+        recognitionRef.current = null;
+      };
+      rec.onend = () => {
+        setIsListeningDialogue(false);
+        recognitionRef.current = null;
+        const spoken = capturedSpeechRef.current.trim();
+        capturedSpeechRef.current = '';
+        if (spoken) {
+          void finalizeShotVoiceDictation(spoken);
+        }
+      };
+      recognitionRef.current = rec;
+      rec.start();
+      setIsListeningDialogue(true);
+      setFilmVoiceNote(`Listening in ${activeVoiceLang.nativeLabel} for ${resolvedSpeaker?.name || 'Speaker'}...`);
+    } catch {
+      setFilmVoiceError('Could not start voice recognition.');
+      setIsListeningDialogue(false);
+    }
+  };
 
   const handleApplyPreset = (presetIndex: number) => {
     const preset = FILM_PRESETS[presetIndex];
@@ -267,6 +615,11 @@ export function FilmDirectorPanel({
   };
 
   const handleUploadCharFace = (charId: string, file: File) => {
+    const check = validateMediaUploadFile(file, 'image');
+    if (!check.valid) {
+      onSecurityAlert(check.reason || 'Unsupported portrait image.');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       handleUpdateCharacter(charId, { portraitDataUrl: String(reader.result || '') });
@@ -301,6 +654,7 @@ export function FilmDirectorPanel({
 
   const canRender =
     !isGenerating &&
+    cooldownSeconds === 0 &&
     characters.length > 0 &&
     shots.some((s) => s.dialogue.trim().length > 0);
 
@@ -322,6 +676,119 @@ export function FilmDirectorPanel({
         <p className="text-xs leading-relaxed text-slate-400">
           Assign lines to different characters. Each speaker receives a distinct voice and isolated face lip-sync before stitching into one movie.
         </p>
+      </div>
+
+      {/* Voice-First Dialogue Control inside Film Director */}
+      <div className="rounded-xl border border-cyan-400/35 bg-gradient-to-r from-cyan-400/12 via-cyan-400/[0.06] to-indigo-400/10 p-3 space-y-2.5">
+        <div className="flex items-center justify-between gap-2 text-[11px] text-slate-300">
+          <span className="font-semibold text-cyan-200">
+            Voice Dialogue Mode ({resolvedSpeaker?.name || 'Speaker'} · {activeVoiceLang.nativeLabel})
+          </span>
+          <select
+            aria-label="Target shot for voice dictation"
+            value={resolvedTargetShot?.id || ''}
+            onChange={(e) => setActiveShotId(e.target.value)}
+            className="rounded-md border border-white/15 bg-[#07090E] px-2 py-0.5 text-[11px] text-slate-200"
+          >
+            {shots.map((s, idx) => (
+              <option key={s.id} value={s.id}>
+                Shot 0{idx + 1}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <button
+          type="button"
+          onClick={toggleFilmSpeakToCreate}
+          disabled={isProcessingVoice || isGenerating}
+          aria-pressed={isListeningDialogue}
+          className={`flex min-h-[46px] w-full items-center justify-center gap-2 rounded-xl px-4 py-2 text-xs font-bold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:opacity-60 ${
+            isListeningDialogue
+              ? 'border border-rose-400/80 bg-rose-500/25 text-rose-100 shadow-[0_0_20px_rgba(244,63,94,0.4)]'
+              : 'bg-cyan-400 text-slate-950 hover:bg-cyan-300'
+          }`}
+        >
+          {isProcessingVoice ? (
+            <>
+              <Loader2 className="h-4 w-4 animate-spin" />
+              <span>Polishing Spoken Dialogue...</span>
+            </>
+          ) : isListeningDialogue ? (
+            <>
+              <MicOff className="h-4 w-4" />
+              <span>Finish Dialogue ({activeVoiceLang.nativeLabel})</span>
+            </>
+          ) : (
+            <>
+              <Mic className="h-4 w-4" />
+              <span>Speak to Create (Bol Kar Banayein) · {activeVoiceLang.nativeLabel}</span>
+            </>
+          )}
+        </button>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+          <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={voiceAutoGenerate}
+              onChange={(e) => {
+                onVoiceAutoGenerateChange(e.target.checked);
+                if (!e.target.checked) clearAutoCountdown();
+              }}
+              className="h-4 w-4 rounded border-white/25 bg-[#07090E] accent-cyan-400"
+            />
+            <span className="font-semibold">Voice Auto-Generate (2s)</span>
+          </label>
+
+          <button
+            type="button"
+            role="switch"
+            aria-checked={voiceReadbackEnabled}
+            onClick={() => {
+              const next = !voiceReadbackEnabled;
+              onVoiceReadbackChange(next);
+              if (!next) stopVoiceReadback();
+            }}
+            className={`inline-flex items-center gap-1 rounded-lg border px-2 py-0.5 font-semibold transition-colors ${
+              voiceReadbackEnabled
+                ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                : 'border-white/10 bg-[#07090E]/80 text-slate-400'
+            }`}
+          >
+            {voiceReadbackEnabled ? (
+              <Volume2 className="h-3 w-3 text-cyan-300" />
+            ) : (
+              <VolumeX className="h-3 w-3 text-slate-400" />
+            )}
+            <span>Readback: {voiceReadbackEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+        </div>
+
+        {autoRenderCountdown !== null && (
+          <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-400/50 bg-amber-400/15 px-3 py-1.5 text-xs text-amber-100">
+            <span className="font-mono font-semibold tabular-nums">
+              Auto-rendering film in {autoRenderCountdown}s...
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                clearAutoCountdown();
+                if (voiceReadbackEnabled) {
+                  void speakVoiceConfirmation(activeVoiceLang.id, 'autoGenCancelled');
+                }
+              }}
+              className="rounded border border-amber-300/60 bg-black/40 px-2 py-0.5 text-[11px] font-bold text-white"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
+
+        {filmVoiceNote && !filmVoiceError && (
+          <p className="text-[11px] text-slate-300">{filmVoiceNote}</p>
+        )}
+        {filmVoiceError && <p className="text-[11px] text-amber-300">{filmVoiceError}</p>}
       </div>
 
       {/* Quick Film Script Presets */}
@@ -424,11 +891,12 @@ export function FilmDirectorPanel({
                           fileInputsRef.current[char.id] = el;
                         }}
                         type="file"
-                        accept="image/*"
+                        accept="image/png,image/jpeg,image/webp"
                         className="hidden"
                         onChange={(e) => {
                           const file = e.target.files?.[0];
                           if (file) handleUploadCharFace(char.id, file);
+                          e.target.value = '';
                         }}
                       />
                       <button
@@ -707,7 +1175,7 @@ export function FilmDirectorPanel({
       <button
         type="button"
         disabled={!canRender}
-        onClick={onRenderFilm}
+        onClick={() => onRenderFilm()}
         className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-cyan-400 to-indigo-400 px-5 py-3 text-sm font-bold text-slate-950 transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
       >
         {isGenerating ? (
@@ -715,6 +1183,8 @@ export function FilmDirectorPanel({
             <Loader2 className="h-4 w-4 animate-spin" />
             <span className="font-mono tabular-nums">Rendering Film · {progressPercent}%</span>
           </>
+        ) : cooldownSeconds > 0 ? (
+          <span className="font-mono tabular-nums">Cooldown · Wait {cooldownSeconds}s</span>
         ) : (
           <>
             <Clapperboard className="h-4 w-4" />

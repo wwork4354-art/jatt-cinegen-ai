@@ -21,9 +21,21 @@ import {
   Trash2,
   Upload,
   Volume2,
+  VolumeX,
   Wand2,
 } from 'lucide-react';
+import {
+  maskApiKey,
+  sanitizeUserText,
+  validateMediaUploadFile,
+  validateSafePromptAndScript,
+} from '../../shared/securityShield';
+import { enhanceTextToVideoPromptFraming } from '../../shared/videoPromptFraming';
 import { LANGUAGES, type LanguageCode, type UIStrings } from '../lib/i18n';
+import {
+  speakVoiceConfirmation,
+  stopVoiceReadback,
+} from '../lib/voiceSpeaker';
 import {
   getVoiceLanguageById,
   MORE_VOICE_LANGUAGES,
@@ -102,8 +114,14 @@ interface PromptPanelProps {
   recentImages: CreationItem[];
   characterFaceLock: CharacterFaceLockConfig;
   onCharacterFaceLockChange: (next: CharacterFaceLockConfig) => void;
+  voiceAutoGenerate: boolean;
+  onVoiceAutoGenerateChange: (enabled: boolean) => void;
+  voiceReadbackEnabled: boolean;
+  onVoiceReadbackChange: (enabled: boolean) => void;
+  cooldownSeconds: number;
+  onSecurityAlert: (message: string) => void;
   isGenerating: boolean;
-  onGenerate: () => void;
+  onGenerate: (overridePrompt?: string) => void;
 }
 
 interface SpeechRecognitionAlternativeLike {
@@ -219,6 +237,12 @@ export function PromptPanel({
   recentImages,
   characterFaceLock,
   onCharacterFaceLockChange,
+  voiceAutoGenerate,
+  onVoiceAutoGenerateChange,
+  voiceReadbackEnabled,
+  onVoiceReadbackChange,
+  cooldownSeconds,
+  onSecurityAlert,
   isGenerating,
   onGenerate,
 }: PromptPanelProps) {
@@ -231,6 +255,14 @@ export function PromptPanel({
   const audioChunksRef = useRef<Blob[]>([]);
   const promptRef = useRef(prompt);
   promptRef.current = prompt;
+  const voiceFirstSessionRef = useRef(false);
+  const sessionCapturedTextRef = useRef('');
+  const autoGenTimeoutRef = useRef<number | null>(null);
+  const autoGenIntervalRef = useRef<number | null>(null);
+  const voiceAutoGenRef = useRef(voiceAutoGenerate);
+  voiceAutoGenRef.current = voiceAutoGenerate;
+  const voiceReadbackRef = useRef(voiceReadbackEnabled);
+  voiceReadbackRef.current = voiceReadbackEnabled;
 
   const [lipSyncAudioPreviewUrl, setLipSyncAudioPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
@@ -247,7 +279,10 @@ export function PromptPanel({
 
   const [isDragging, setIsDragging] = useState(false);
   const [isListening, setIsListening] = useState(false);
+  const [isVoiceFirstActive, setIsVoiceFirstActive] = useState(false);
   const [isTranscribingVoice, setIsTranscribingVoice] = useState(false);
+  const [isEnrichingSpeech, setIsEnrichingSpeech] = useState(false);
+  const [autoGenCountdown, setAutoGenCountdown] = useState<number | null>(null);
   const [interimTranscript, setInterimTranscript] = useState('');
   const [voiceStatusNote, setVoiceStatusNote] = useState<string | null>(null);
   const [voiceError, setVoiceError] = useState<string | null>(null);
@@ -274,11 +309,28 @@ export function PromptPanel({
     else if (language === 'ar') onVoiceLanguageChange('ar');
     else if (language === 'ru') onVoiceLanguageChange('ru');
     else if (language === 'zh') onVoiceLanguageChange('zh');
+    else if (language === 'sd') onVoiceLanguageChange('sd');
+    else if (language === 'ta') onVoiceLanguageChange('ta');
+    else if (language === 'te') onVoiceLanguageChange('te');
     else if (language === 'en') onVoiceLanguageChange('en');
   }, [language, onVoiceLanguageChange]);
 
+  const clearAutoGenerateCountdown = () => {
+    if (autoGenTimeoutRef.current !== null) {
+      window.clearTimeout(autoGenTimeoutRef.current);
+      autoGenTimeoutRef.current = null;
+    }
+    if (autoGenIntervalRef.current !== null) {
+      window.clearInterval(autoGenIntervalRef.current);
+      autoGenIntervalRef.current = null;
+    }
+    setAutoGenCountdown(null);
+  };
+
   useEffect(() => {
     return () => {
+      clearAutoGenerateCountdown();
+      stopVoiceReadback();
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
@@ -301,6 +353,92 @@ export function PromptPanel({
 
   const activeVoiceLang = getVoiceLanguageById(voiceLanguageId);
   const isMoreLanguageSelected = !activeVoiceLang.isQuickPill;
+
+  const enrichSpokenPromptFallback = (spoken: string): string => {
+    const clean = spoken.trim();
+    if (!clean) return '';
+    if (mode === 'lip-sync') return clean;
+    const styleDesc =
+      stylePreset === 'anime'
+        ? 'theatrical anime animation, crisp linework, vibrant lighting'
+        : stylePreset === '3d-render'
+        ? 'octane 3D cinematic render, volumetric depth, sharp focus'
+        : stylePreset === 'realistic'
+        ? 'photorealistic live-action 8k cinematography, natural lighting'
+        : 'cinematic film lighting, atmospheric depth, sharp 4k detail';
+    const expanded = `${clean}, ${styleDesc}, dramatic balanced framing`;
+    return mode === 'text-to-video' ? enhanceTextToVideoPromptFraming(expanded) : expanded;
+  };
+
+  const finalizeVoiceFirstSpeech = async (rawSpoken: string) => {
+    const securityCheck = validateSafePromptAndScript(rawSpoken, 'Voice input');
+    if (!securityCheck.safe) {
+      const msg = securityCheck.reason || 'Blocked unsafe voice input.';
+      setVoiceError(msg);
+      onSecurityAlert(msg);
+      return;
+    }
+
+    const cleanSpoken = securityCheck.sanitized.trim();
+    if (!cleanSpoken) return;
+
+    setIsEnrichingSpeech(true);
+    setVoiceStatusNote('Converting speech into detailed AI prompt...');
+    let enrichedPrompt = '';
+
+    try {
+      const res = await fetch('/api/enhance-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          prompt: cleanSpoken,
+          mode,
+          style: stylePreset,
+          cameraMotion,
+          groqKey: groqKey.trim() || undefined,
+          openRouterKey: openRouterKey.trim() || undefined,
+          togetherKey: togetherKey.trim() || undefined,
+        }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { enhancedPrompt?: string };
+        if (data.enhancedPrompt?.trim()) {
+          enrichedPrompt = sanitizeUserText(data.enhancedPrompt.trim());
+        }
+      }
+    } catch {
+      // Fallback to zero-key local enrichment
+    }
+
+    if (!enrichedPrompt) {
+      enrichedPrompt = enrichSpokenPromptFallback(cleanSpoken);
+    }
+
+    onPromptChange(enrichedPrompt);
+    setIsEnrichingSpeech(false);
+    setVoiceStatusNote(`Ready (${activeVoiceLang.nativeLabel}): detailed prompt created from voice.`);
+
+    if (voiceAutoGenRef.current && !isGenerating) {
+      clearAutoGenerateCountdown();
+      setAutoGenCountdown(2);
+      if (voiceReadbackRef.current) {
+        void speakVoiceConfirmation(voiceLanguageId, 'autoGeneratingIn2s');
+      }
+      let remaining = 2;
+      autoGenIntervalRef.current = window.setInterval(() => {
+        remaining -= 1;
+        if (remaining > 0) {
+          setAutoGenCountdown(remaining);
+        }
+      }, 1000);
+      autoGenTimeoutRef.current = window.setTimeout(() => {
+        clearAutoGenerateCountdown();
+        onGenerate(enrichedPrompt);
+      }, 2000);
+    } else if (voiceReadbackRef.current) {
+      void speakVoiceConfirmation(voiceLanguageId, 'promptEnhanced');
+    }
+  };
 
   const startRecognitionWithCodes = (
     SpeechRecCtor: new () => SpeechRecognitionInstanceLike,
@@ -351,8 +489,12 @@ export function PromptPanel({
             }
           }
           if (finalChunk.trim()) {
+            const safeChunk = sanitizeUserText(finalChunk.trim());
+            sessionCapturedTextRef.current = sessionCapturedTextRef.current
+              ? `${sessionCapturedTextRef.current} ${safeChunk}`
+              : safeChunk;
             const current = promptRef.current.trim();
-            const appended = current ? `${current} ${finalChunk.trim()}` : finalChunk.trim();
+            const appended = current ? `${current} ${safeChunk}` : safeChunk;
             onPromptChange(appended);
           }
           setInterimTranscript(interimChunk.trim());
@@ -378,14 +520,24 @@ export function PromptPanel({
           setVoiceError(`Voice recognition error: ${event.error}`);
         }
         setIsListening(false);
+        setIsVoiceFirstActive(false);
+        voiceFirstSessionRef.current = false;
         setInterimTranscript('');
       };
 
       recognition.onend = () => {
         if (retryingFallback) return;
+        const wasVoiceFirst = voiceFirstSessionRef.current;
+        const captured = sessionCapturedTextRef.current.trim() || promptRef.current.trim();
+        voiceFirstSessionRef.current = false;
+        sessionCapturedTextRef.current = '';
         setIsListening(false);
+        setIsVoiceFirstActive(false);
         setInterimTranscript('');
         recognitionRef.current = null;
+        if (wasVoiceFirst && captured) {
+          void finalizeVoiceFirstSpeech(captured);
+        }
       };
 
       recognitionRef.current = recognition;
@@ -397,6 +549,8 @@ export function PromptPanel({
       } else {
         setVoiceError('Could not start voice recognition on this device.');
         setIsListening(false);
+        setIsVoiceFirstActive(false);
+        voiceFirstSessionRef.current = false;
       }
     }
   };
@@ -469,13 +623,25 @@ export function PromptPanel({
       }
 
       if (transcriptText) {
+        const safeTranscript = sanitizeUserText(transcriptText);
+        const wasVoiceFirst = voiceFirstSessionRef.current;
+        voiceFirstSessionRef.current = false;
+        setIsVoiceFirstActive(false);
         const current = promptRef.current.trim();
-        onPromptChange(current ? `${current} ${transcriptText}` : transcriptText);
+        const combined = current ? `${current} ${safeTranscript}` : safeTranscript;
+        onPromptChange(combined);
         setVoiceStatusNote(`Transcribed with Groq whisper-large-v3-turbo (${activeVoiceLang.nativeLabel}).`);
+        if (wasVoiceFirst) {
+          await finalizeVoiceFirstSpeech(safeTranscript);
+        }
       } else {
+        voiceFirstSessionRef.current = false;
+        setIsVoiceFirstActive(false);
         setVoiceError('No clear speech detected in recording. Please speak closer to the mic.');
       }
     } catch (err) {
+      voiceFirstSessionRef.current = false;
+      setIsVoiceFirstActive(false);
       setVoiceError(err instanceof Error ? err.message : 'Groq Whisper voice transcription failed.');
     } finally {
       setIsTranscribingVoice(false);
@@ -516,6 +682,9 @@ export function PromptPanel({
         if (chunks.length > 0) {
           const blob = new Blob(chunks, { type: recorder.mimeType || 'audio/webm' });
           void transcribeAudioWithGroqWhisper(blob);
+        } else {
+          voiceFirstSessionRef.current = false;
+          setIsVoiceFirstActive(false);
         }
       };
 
@@ -527,12 +696,15 @@ export function PromptPanel({
       return true;
     } catch {
       setVoiceError('Microphone access denied. Please allow microphone permission.');
+      voiceFirstSessionRef.current = false;
+      setIsVoiceFirstActive(false);
       return true;
     }
   };
 
-  const toggleVoiceInput = async () => {
-    if (isTranscribingVoice) return;
+  const startVoiceCapture = async (voiceFirstMode: boolean) => {
+    if (isTranscribingVoice || isEnrichingSpeech) return;
+    clearAutoGenerateCountdown();
     setVoiceError(null);
     setVoiceStatusNote(null);
 
@@ -551,9 +723,21 @@ export function PromptPanel({
       } catch {
         // Ignore stop errors
       }
-      setIsListening(false);
-      setInterimTranscript('');
       return;
+    }
+
+    voiceFirstSessionRef.current = voiceFirstMode;
+    sessionCapturedTextRef.current = '';
+    setIsVoiceFirstActive(voiceFirstMode);
+
+    if (voiceFirstMode) {
+      if (!voiceReadbackEnabled) {
+        onVoiceReadbackChange(true);
+      }
+      if (!promptRef.current.trim()) {
+        sessionCapturedTextRef.current = '';
+      }
+      void speakVoiceConfirmation(voiceLanguageId, 'listeningStart');
     }
 
     if (groqKey.trim()) {
@@ -575,6 +759,8 @@ export function PromptPanel({
       ).webkitSpeechRecognition;
 
     if (!SpeechRecCtor) {
+      voiceFirstSessionRef.current = false;
+      setIsVoiceFirstActive(false);
       setVoiceError(
         'Voice input needs Chrome/Edge/Safari SpeechRecognition or a Groq Free API Key (whisper-large-v3-turbo).'
       );
@@ -585,12 +771,19 @@ export function PromptPanel({
     startRecognitionWithCodes(SpeechRecCtor, codeQueue, 0);
   };
 
+  const toggleVoiceInput = () => startVoiceCapture(false);
+  const toggleSpeakToCreate = () => startVoiceCapture(true);
+
   const isVideoMode = mode === 'text-to-video' || mode === 'image-to-video';
   const isLipSyncMode = mode === 'lip-sync';
   const aspectOptions: AspectRatio[] = ['16:9', '9:16', '1:1'];
 
   const handleFileRead = (file: File) => {
-    if (!file.type.startsWith('image/')) return;
+    const check = validateMediaUploadFile(file, 'image');
+    if (!check.valid) {
+      onSecurityAlert(check.reason || 'Unsupported image file.');
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === 'string') {
@@ -633,6 +826,7 @@ export function PromptPanel({
 
   const canGenerate =
     !isGenerating &&
+    cooldownSeconds === 0 &&
     (isLipSyncMode
       ? Boolean(uploadedImageUrl) &&
         (lipSyncAudioMode === 'upload'
@@ -657,7 +851,7 @@ export function PromptPanel({
     mode === 'text-to-image'
       ? 'Generate Full HD images via Together AI (FLUX.1-schnell-Free) or 100% free Pollinations AI.'
       : mode === 'lip-sync'
-      ? 'Upload any Portrait Photo + Song or typed dialogue in 15 languages — synced via Hugging Face & Replicate SadTalker GPUs with instant Animator backup.'
+      ? 'Upload any Portrait Photo + Song or typed dialogue in 17 languages — synced via Hugging Face & Replicate SadTalker GPUs with instant Animator backup.'
       : mode === 'text-to-video'
       ? 'Generates real character & object motion via Wan 2.1, Fal.ai, Replicate, Agnes AI & CogVideoX APIs (falls back to animated Pollinations only if APIs fail).'
       : 'Upload any reference photo and animate real character & scene motion via Wan 2.1 I2V, Fal.ai, Replicate, Google Veo & LTX-Video.';
@@ -853,7 +1047,7 @@ export function PromptPanel({
               }`}
             >
               <Volume2 className="h-3.5 w-3.5 shrink-0" />
-              <span className="truncate">Type Speech (15 Languages)</span>
+              <span className="truncate">Type Speech (17 Languages)</span>
             </button>
           </div>
 
@@ -866,6 +1060,14 @@ export function PromptPanel({
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
+                  if (file) {
+                    const check = validateMediaUploadFile(file, 'audio');
+                    if (!check.valid) {
+                      onSecurityAlert(check.reason || 'Unsupported audio file.');
+                      e.target.value = '';
+                      return;
+                    }
+                  }
                   onLipSyncAudioFileChange(file);
                   e.target.value = '';
                 }}
@@ -907,15 +1109,109 @@ export function PromptPanel({
         </div>
       )}
 
-      {/* Prompt / Speech Script Input + Magic Enhance */}
+      {/* Prompt / Speech Script Input + Full Voice-First Control Mode */}
       {(!isLipSyncMode || lipSyncAudioMode === 'tts') && (
       <div className="space-y-2.5">
+        {/* Prominent Hands-Free Voice-First CTA for Non-Readers */}
+        <div className="rounded-xl border border-cyan-400/35 bg-gradient-to-r from-cyan-400/12 via-cyan-400/[0.06] to-indigo-400/10 p-3 space-y-2.5">
+          <button
+            type="button"
+            onClick={toggleSpeakToCreate}
+            disabled={isTranscribingVoice || isEnrichingSpeech || isGenerating}
+            aria-pressed={isListening && isVoiceFirstActive}
+            className={`flex min-h-[50px] w-full items-center justify-center gap-2.5 rounded-xl px-4 py-2.5 text-sm font-bold transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 disabled:opacity-60 ${
+              isListening && isVoiceFirstActive
+                ? 'border border-rose-400/80 bg-rose-500/25 text-rose-100 shadow-[0_0_24px_rgba(244,63,94,0.4)]'
+                : 'bg-cyan-400 text-slate-950 shadow-[0_0_20px_rgba(34,211,238,0.28)] hover:bg-cyan-300'
+            }`}
+          >
+            {isTranscribingVoice || isEnrichingSpeech ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin shrink-0" />
+                <span>
+                  {isEnrichingSpeech
+                    ? 'Preparing Prompt From Your Voice...'
+                    : 'Transcribing Speech...'}
+                </span>
+              </>
+            ) : isListening && isVoiceFirstActive ? (
+              <>
+                <MicOff className="h-5 w-5 shrink-0" />
+                <span>Finish Speaking ({activeVoiceLang.nativeLabel})</span>
+              </>
+            ) : (
+              <>
+                <Mic className="h-5 w-5 shrink-0" />
+                <span>Speak to Create (Bol Kar Banayein) · {activeVoiceLang.nativeLabel}</span>
+              </>
+            )}
+          </button>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+            <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={voiceAutoGenerate}
+                onChange={(e) => {
+                  onVoiceAutoGenerateChange(e.target.checked);
+                  if (!e.target.checked) clearAutoGenerateCountdown();
+                }}
+                className="h-4 w-4 rounded border-white/25 bg-[#07090E] accent-cyan-400"
+              />
+              <span className="font-semibold">Voice Auto-Generate (2s)</span>
+            </label>
+
+            <button
+              type="button"
+              role="switch"
+              aria-checked={voiceReadbackEnabled}
+              onClick={() => {
+                const next = !voiceReadbackEnabled;
+                onVoiceReadbackChange(next);
+                if (!next) stopVoiceReadback();
+              }}
+              className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 font-semibold transition-colors ${
+                voiceReadbackEnabled
+                  ? 'border-cyan-400/50 bg-cyan-400/15 text-cyan-200'
+                  : 'border-white/10 bg-[#07090E]/80 text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {voiceReadbackEnabled ? (
+                <Volume2 className="h-3.5 w-3.5 text-cyan-300" />
+              ) : (
+                <VolumeX className="h-3.5 w-3.5 text-slate-400" />
+              )}
+              <span>Voice Readback: {voiceReadbackEnabled ? 'ON' : 'OFF'}</span>
+            </button>
+          </div>
+
+          {autoGenCountdown !== null && (
+            <div className="flex items-center justify-between gap-2 rounded-lg border border-amber-400/50 bg-amber-400/15 px-3 py-2 text-xs text-amber-100">
+              <span className="font-semibold font-mono tabular-nums">
+                Auto-creating in {autoGenCountdown}s...
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  clearAutoGenerateCountdown();
+                  if (voiceReadbackEnabled) {
+                    void speakVoiceConfirmation(voiceLanguageId, 'autoGenCancelled');
+                  }
+                }}
+                className="rounded-md border border-amber-300/60 bg-black/40 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-black/60"
+              >
+                Cancel
+              </button>
+            </div>
+          )}
+        </div>
+
         <div className="flex items-center justify-between gap-2">
           <label
             htmlFor="studio-prompt"
             className="text-xs font-semibold tracking-wide text-slate-300"
           >
-            {isLipSyncMode ? 'Dialogue / Speech Script (15 Languages AI Voice)' : strings.promptLabel}
+            {isLipSyncMode ? 'Dialogue / Speech Script (17 Languages AI Voice)' : strings.promptLabel}
           </label>
           <div className="flex items-center gap-2">
             {previousPrompt && (
@@ -958,7 +1254,7 @@ export function PromptPanel({
             rows={4}
             placeholder={
               isLipSyncMode
-                ? 'Type or speak lyrics/dialogue in English, Urdu, Punjabi, Saraiki, Pashto, Hindi, Arabic...'
+                ? 'Type or speak lyrics/dialogue in English, Urdu, Punjabi, Saraiki, Pashto, Sindhi, Tamil, Telugu, Hindi, Arabic...'
                 : mode === 'image-to-video'
                 ? strings.promptPlaceholderAnimate
                 : mode === 'text-to-video'
@@ -1406,6 +1702,14 @@ export function PromptPanel({
                 className="hidden"
                 onChange={(e) => {
                   const file = e.target.files?.[0] ?? null;
+                  if (file) {
+                    const check = validateMediaUploadFile(file, 'audio');
+                    if (!check.valid) {
+                      onSecurityAlert(check.reason || 'Unsupported audio file.');
+                      e.target.value = '';
+                      return;
+                    }
+                  }
                   onBackgroundMusicChange(file);
                   e.target.value = '';
                 }}
@@ -1543,9 +1847,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {hfToken.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(hfToken)}
                           </span>
                           <button
                             type="button"
@@ -1599,9 +1903,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {digenKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(digenKey)}
                           </span>
                           <button
                             type="button"
@@ -1668,9 +1972,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {agnesApiKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(agnesApiKey)}
                           </span>
                           <button
                             type="button"
@@ -1724,9 +2028,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {falKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(falKey)}
                           </span>
                           <button
                             type="button"
@@ -1773,9 +2077,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {replicateToken.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(replicateToken)}
                           </span>
                           <button
                             type="button"
@@ -1826,9 +2130,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {togetherKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(togetherKey)}
                           </span>
                           <button
                             type="button"
@@ -1879,9 +2183,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {groqKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(groqKey)}
                           </span>
                           <button
                             type="button"
@@ -1932,9 +2236,9 @@ export function PromptPanel({
                     <div className="flex items-center gap-2">
                       {openRouterKey.trim() && (
                         <>
-                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-mono font-semibold text-emerald-300">
                             <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                            Active
+                            Active · {maskApiKey(openRouterKey)}
                           </span>
                           <button
                             type="button"
@@ -2024,7 +2328,7 @@ export function PromptPanel({
       {/* Primary Generate Button */}
       <button
         type="button"
-        onClick={onGenerate}
+        onClick={() => onGenerate()}
         disabled={!canGenerate}
         className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-6 py-3 text-sm font-bold text-slate-950 shadow-[0_0_24px_rgba(34,211,238,0.28)] transition-all hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1118]"
       >
@@ -2033,6 +2337,10 @@ export function PromptPanel({
             <Loader2 className="h-4 w-4 animate-spin" />
             {strings.generatingBtn}
           </>
+        ) : cooldownSeconds > 0 ? (
+          <span className="font-mono tabular-nums">
+            Cooldown · Wait {cooldownSeconds}s
+          </span>
         ) : isLipSyncMode ? (
           <>
             <Mic className="h-4 w-4" />

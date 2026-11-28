@@ -57,6 +57,7 @@ interface JattLifetimeStudioProps {
   onKeyframeSourceChange: (source: LifetimeKeyframeSource) => void;
   offlineImageMode: boolean;
   onOfflineImageModeChange: (offline: boolean) => void;
+  cooldownSeconds?: number;
   isGenerating: boolean;
   onGenerate: () => void;
 }
@@ -88,6 +89,7 @@ export function JattLifetimeStudio({
   onKeyframeSourceChange,
   offlineImageMode,
   onOfflineImageModeChange,
+  cooldownSeconds = 0,
   isGenerating,
   onGenerate,
 }: JattLifetimeStudioProps) {
@@ -536,7 +538,7 @@ export function JattLifetimeStudio({
       <button
         type="button"
         onClick={onGenerate}
-        disabled={isGenerating || !prompt.trim()}
+        disabled={isGenerating || cooldownSeconds > 0 || !prompt.trim()}
         className="flex min-h-[48px] w-full items-center justify-center gap-2 rounded-xl bg-cyan-400 px-6 py-3 text-sm font-bold text-slate-950 shadow-[0_0_24px_rgba(34,211,238,0.28)] transition-all hover:bg-cyan-300 disabled:cursor-not-allowed disabled:bg-slate-800 disabled:text-slate-500 disabled:shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-300 focus-visible:ring-offset-2 focus-visible:ring-offset-[#0D1118]"
       >
         {isGenerating ? (
@@ -544,6 +546,8 @@ export function JattLifetimeStudio({
             <Loader2 className="h-4 w-4 animate-spin" />
             <span>Rendering Free Creation...</span>
           </>
+        ) : cooldownSeconds > 0 ? (
+          <span className="font-mono tabular-nums">Cooldown · Wait {cooldownSeconds}s</span>
         ) : subTab === 'generate-image' ? (
           <>
             <ImageIcon className="h-4 w-4" />

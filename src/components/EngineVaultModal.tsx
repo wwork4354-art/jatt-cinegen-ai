@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { Check, Cpu, Eye, EyeOff, KeyRound, ShieldCheck, Sparkles, X } from 'lucide-react';
+import { maskApiKey } from '../../shared/securityShield';
 import type { EngineVaultKeys } from '../types/studio';
 
 interface EngineVaultModalProps {
@@ -12,16 +13,18 @@ interface EngineVaultModalProps {
 
 function EngineStatusBadge({
   isActive,
+  maskedKey,
   fallbackHint,
 }: {
   isActive: boolean;
+  maskedKey?: string;
   fallbackHint: string;
 }) {
   if (isActive) {
     return (
-      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-400/40 bg-emerald-500/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300 font-mono">
         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-        Active
+        Active{maskedKey ? ` · ${maskedKey}` : ''}
       </span>
     );
   }
@@ -149,6 +152,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftGeminiKey.trim())}
+                maskedKey={maskApiKey(draftGeminiKey)}
                 fallbackHint="veo-2.0-generate-001"
               />
             </div>
@@ -185,6 +189,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftHfToken.trim())}
+                maskedKey={maskApiKey(draftHfToken)}
                 fallbackHint="LTX · Wan2.1 · SVD · SadTalker"
               />
             </div>
@@ -221,6 +226,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftSiliconFlowKey.trim())}
+                maskedKey={maskApiKey(draftSiliconFlowKey)}
                 fallbackHint="Wan-AI/Wan2.1-T2V-14B"
               />
             </div>
@@ -257,6 +263,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftPollinationsKey.trim())}
+                maskedKey={maskApiKey(draftPollinationsKey)}
                 fallbackHint="seedance · wan · veo"
               />
             </div>
@@ -299,6 +306,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftDigenKey.trim())}
+                maskedKey={maskApiKey(draftDigenKey)}
                 fallbackHint="Video & Talking Avatar"
               />
             </div>
@@ -350,6 +358,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftAgnesKey.trim())}
+                maskedKey={maskApiKey(draftAgnesKey)}
                 fallbackHint="VITE_AGNES_API_KEY"
               />
             </div>
@@ -392,6 +401,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftFalKey.trim())}
+                maskedKey={maskApiKey(draftFalKey)}
                 fallbackHint="wan/v2.1 · minimax-video"
               />
             </div>
@@ -432,6 +442,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftReplicateToken.trim())}
+                maskedKey={maskApiKey(draftReplicateToken)}
                 fallbackHint="wan-2.1-t2v-480p · sadtalker"
               />
             </div>
@@ -474,6 +485,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftTogetherKey.trim())}
+                maskedKey={maskApiKey(draftTogetherKey)}
                 fallbackHint="VITE_TOGETHER_API_KEY"
               />
             </div>
@@ -516,6 +528,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftGroqKey.trim())}
+                maskedKey={maskApiKey(draftGroqKey)}
                 fallbackHint="Llama 3.3 · Whisper Voice"
               />
             </div>
@@ -558,6 +571,7 @@ export function EngineVaultModal({
               </label>
               <EngineStatusBadge
                 isActive={Boolean(draftOpenRouterKey.trim())}
+                maskedKey={maskApiKey(draftOpenRouterKey)}
                 fallbackHint="Llama 3.3 :free · Gemini :free"
               />
             </div>

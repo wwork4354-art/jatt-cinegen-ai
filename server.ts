@@ -18,6 +18,12 @@ import {
   enhanceTextToVideoPromptFraming,
   isCloseUpRequested,
 } from './shared/videoPromptFraming.ts';
+import {
+  isSafeMediaDataUrl,
+  redactSecrets,
+  validateExternalEndpointUrl,
+  validateSafePromptAndScript,
+} from './shared/securityShield.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -213,12 +219,73 @@ function parseGeminiErrorMessage(err: unknown): { status: number; message: strin
       message: 'Gemini free-tier rate limit reached. Please wait a moment and try again.',
     };
   }
-  return { status: 500, message: raw || 'Unexpected server error.' };
+  return { status: 500, message: redactSecrets(raw) || 'Unexpected server error.' };
+}
+
+const ipRateBuckets = new Map<string, number[]>();
+const API_RATE_WINDOW_MS = 60_000;
+const API_RATE_MAX_HITS = 35;
+
+function enforceApiRateLimit(
+  req: express.Request,
+  res: express.Response,
+  next: express.NextFunction
+) {
+  const forwarded = typeof req.headers['x-forwarded-for'] === 'string'
+    ? req.headers['x-forwarded-for'].split(',')[0].trim()
+    : '';
+  const clientIp = forwarded || req.ip || 'unknown';
+  const now = Date.now();
+  const prev = ipRateBuckets.get(clientIp) ?? [];
+  const active = prev.filter((ts) => now - ts < API_RATE_WINDOW_MS);
+
+  if (active.length >= API_RATE_MAX_HITS) {
+    const oldest = active[0] ?? now;
+    const retryAfter = Math.max(1, Math.ceil((oldest + API_RATE_WINDOW_MS - now) / 1000));
+    res.setHeader('Retry-After', String(retryAfter));
+    res.status(429).json({
+      error: `Rate limit exceeded. Too many AI requests from this client — retry in ${retryAfter}s.`,
+    });
+    return;
+  }
+
+  active.push(now);
+  ipRateBuckets.set(clientIp, active);
+  if (ipRateBuckets.size > 2000) {
+    for (const [key, list] of ipRateBuckets.entries()) {
+      if (list.every((ts) => now - ts >= API_RATE_WINDOW_MS)) {
+        ipRateBuckets.delete(key);
+      }
+    }
+  }
+  next();
 }
 
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader(
+      'Content-Security-Policy',
+      "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com https://*.run.app http://localhost:*"
+    );
+    next();
+  });
   app.use(express.json({ limit: '50mb' }));
+  app.use(
+    [
+      '/api/enhance-prompt',
+      '/api/translate-prompt',
+      '/api/transcribe-audio',
+      '/api/expand-scenes',
+      '/api/generate',
+      '/api/tts-audio',
+      '/api/check-backend',
+    ],
+    enforceApiRateLimit
+  );
 
   // 1. Magic Enhance Prompt using Gemini -> Groq (llama-3.3-70b-versatile) -> OpenRouter (free models) -> Together AI
   app.post('/api/enhance-prompt', async (req, res) => {
@@ -235,7 +302,12 @@ async function startServer() {
           togetherKey?: string;
         };
 
-      const cleanPrompt = (prompt || '').trim();
+      const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+      if (!promptCheck.safe) {
+        res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+        return;
+      }
+      const cleanPrompt = promptCheck.sanitized.trim();
       if (!cleanPrompt) {
         res.status(400).json({ error: 'Please enter a starting idea before enhancing.' });
         return;
@@ -377,7 +449,12 @@ async function startServer() {
           openRouterKey?: string;
         };
 
-      const cleanPrompt = (prompt || '').trim();
+      const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+      if (!promptCheck.safe) {
+        res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+        return;
+      }
+      const cleanPrompt = promptCheck.sanitized.trim();
       if (!cleanPrompt) {
         res.status(400).json({ error: 'Prompt is required.' });
         return;
@@ -391,7 +468,7 @@ async function startServer() {
 
       const langNote = sourceLanguage ? ` (spoken/written in ${sourceLanguage})` : '';
       const sysPrompt =
-        'You are a multilingual translator specializing in South Asian, Middle Eastern, East Asian, and European languages (including Urdu, Punjabi, Saraiki, Pashto, Balochi, Hindi, Bengali, Persian, Arabic, Tamil, Marathi, Sanskrit, Russian, Chinese). Translate accurately to natural descriptive English. Return ONLY the translated English text.';
+        'You are a multilingual translator specializing in South Asian, Middle Eastern, East Asian, and European languages (including Urdu, Punjabi, Saraiki, Pashto, Balochi, Sindhi, Tamil, Telugu, Hindi, Bengali, Persian, Arabic, Marathi, Sanskrit, Russian, Chinese). Translate accurately to natural descriptive English. Return ONLY the translated English text.';
       const usrPrompt = `Translate this visual image/video generation prompt${langNote} into clear, vivid, natural English suitable for an AI image/video generator. If it is already English, refine grammar slightly without losing any meaning. Return ONLY the English prompt with no quotes or explanation:\n\n${cleanPrompt}`;
 
       if (geminiKey?.trim() || process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY) {
@@ -578,7 +655,12 @@ async function startServer() {
         openRouterKey?: string;
       };
 
-      const cleanPrompt = (prompt || '').trim();
+      const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+      if (!promptCheck.safe) {
+        res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+        return;
+      }
+      const cleanPrompt = promptCheck.sanitized.trim();
       if (!cleanPrompt) {
         res.status(400).json({ error: 'Prompt is required.' });
         return;
@@ -697,7 +779,12 @@ async function startServer() {
         togetherKey?: string;
       };
 
-      const cleanPrompt = (prompt || '').trim();
+      const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+      if (!promptCheck.safe) {
+        res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+        return;
+      }
+      const cleanPrompt = promptCheck.sanitized.trim();
       if (!cleanPrompt) {
         res.status(400).json({ error: 'Prompt is required.' });
         return;
@@ -843,9 +930,18 @@ async function startServer() {
       digenKey?: string;
     };
 
-    const cleanPrompt = (prompt || '').trim();
+    const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+    if (!promptCheck.safe) {
+      res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+      return;
+    }
+    const cleanPrompt = promptCheck.sanitized.trim();
     if (!cleanPrompt) {
       res.status(400).json({ error: 'Prompt is required.' });
+      return;
+    }
+    if (imageDataUrl && !isSafeMediaDataUrl(imageDataUrl, 'image')) {
+      res.status(400).json({ error: 'Unsupported or unsafe image format. Only PNG, JPG, and WebP are allowed.' });
       return;
     }
 
@@ -952,7 +1048,7 @@ async function startServer() {
           type: 'busy',
           message:
             err instanceof Error
-              ? err.message
+              ? redactSecrets(err.message)
               : 'Video API endpoints timed out. Please add a Pollinations or Hugging Face key in API Keys and retry.',
         });
       }
@@ -1020,7 +1116,12 @@ async function startServer() {
         languageCode?: string;
       };
 
-      const cleanText = (text || '').trim().replace(/\s+/g, ' ');
+      const textCheck = validateSafePromptAndScript(text || '', 'Dialogue script');
+      if (!textCheck.safe) {
+        res.status(400).json({ error: textCheck.reason || 'Blocked unsafe dialogue text.' });
+        return;
+      }
+      const cleanText = textCheck.sanitized.trim().replace(/\s+/g, ' ');
       if (!cleanText) {
         res.status(400).json({ error: 'Dialogue text is required to synthesize AI voice.' });
         return;
@@ -1116,6 +1217,12 @@ async function startServer() {
       res.status(400).json({ error: 'Portrait photo and audio track are both required.' });
       return;
     }
+    if (!isSafeMediaDataUrl(imageDataUrl, 'image') || !isSafeMediaDataUrl(audioDataUrl, 'audio')) {
+      res.status(400).json({
+        error: 'Blocked unsupported media format. Only PNG/JPG/WebP portraits and MP3/WAV/M4A/OGG audio are accepted.',
+      });
+      return;
+    }
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1177,18 +1284,12 @@ async function startServer() {
         return;
       }
 
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(url.trim());
-      } catch {
-        res.status(400).json({ ok: false, error: 'Invalid URL format. Include https:// or http://' });
+      const check = validateExternalEndpointUrl(url);
+      if (!check.valid || !check.parsed) {
+        res.status(400).json({ ok: false, error: check.reason || 'Invalid URL.' });
         return;
       }
-
-      if (parsedUrl.protocol !== 'https:' && parsedUrl.protocol !== 'http:') {
-        res.status(400).json({ ok: false, error: 'Only HTTP and HTTPS backend URLs are supported.' });
-        return;
-      }
+      const parsedUrl = check.parsed;
 
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
@@ -1208,11 +1309,11 @@ async function startServer() {
         });
       } catch (err) {
         clearTimeout(timeoutId);
-        const msg = err instanceof Error ? err.message : 'Unable to reach endpoint';
+        const msg = err instanceof Error ? redactSecrets(err.message) : 'Unable to reach endpoint';
         res.status(502).json({ ok: false, error: `Could not connect: ${msg}` });
       }
     } catch (error) {
-      const msg = error instanceof Error ? error.message : 'Connection test failed.';
+      const msg = error instanceof Error ? redactSecrets(error.message) : 'Connection test failed.';
       res.status(500).json({ ok: false, error: msg });
     }
   });
@@ -1247,11 +1348,20 @@ async function startServer() {
         return;
       }
 
-      let parsedUrl: URL;
-      try {
-        parsedUrl = new URL(backendUrl.trim());
-      } catch {
-        res.status(400).json({ error: 'Invalid backend URL. Enter a full https:// endpoint.' });
+      const urlCheck = validateExternalEndpointUrl(backendUrl);
+      if (!urlCheck.valid || !urlCheck.parsed) {
+        res.status(400).json({ error: urlCheck.reason || 'Invalid backend URL.' });
+        return;
+      }
+      const parsedUrl = urlCheck.parsed;
+
+      const promptCheck = validateSafePromptAndScript(prompt || '', 'Prompt');
+      if (!promptCheck.safe) {
+        res.status(400).json({ error: promptCheck.reason || 'Blocked unsafe prompt.' });
+        return;
+      }
+      if (imageDataUrl && !isSafeMediaDataUrl(imageDataUrl, 'image')) {
+        res.status(400).json({ error: 'Unsupported or unsafe image format.' });
         return;
       }
 

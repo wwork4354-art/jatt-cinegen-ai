@@ -343,11 +343,13 @@ function drawWrappedSubtitle(
   const paddingX = Math.round(width * 0.06);
   const maxTextW = width - paddingX * 2;
   const fontSize = Math.max(15, Math.round(width * 0.025));
+  const hasRtl = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(lineText);
 
   ctx.save();
-  ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
+  ctx.font = `600 ${fontSize}px system-ui, -apple-system, "Noto Sans Tamil", "Noto Sans Telugu", "Noto Nastaliq Urdu", sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
+  ctx.direction = hasRtl ? 'rtl' : 'ltr';
 
   const words = `${speakerName}: ${lineText}`.split(/\s+/);
   const lines: string[] = [];

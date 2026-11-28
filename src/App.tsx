@@ -27,9 +27,16 @@ import {
   applyCharacterConsistencyLock,
   deriveSeedFromText,
 } from '../shared/characterConsistency';
+import {
+  redactSecrets,
+  validateExternalEndpointUrl,
+  validateSafePromptAndScript,
+} from '../shared/securityShield';
+import { useGenerationRateLimit } from './lib/clientRateLimiter';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
 import { renderCanvasLipSyncVideo } from './lib/lipSyncRenderer';
 import { getVoiceLanguageById, translatePromptToEnglish } from './lib/voiceLanguages';
+import { speakVoiceConfirmation } from './lib/voiceSpeaker';
 import {
   type AspectRatio,
   type CameraMotionId,
@@ -89,6 +96,9 @@ export default function App() {
     }
   });
   const [voiceLanguageId, setVoiceLanguageId] = useState<string>('en');
+  const [voiceAutoGenerate, setVoiceAutoGenerate] = useState<boolean>(false);
+  const [voiceReadbackEnabled, setVoiceReadbackEnabled] = useState<boolean>(false);
+  const { cooldownSeconds, tryAcquire } = useGenerationRateLimit();
 
   const [prompt, setPrompt] = useState('');
   const [previousPrompt, setPreviousPrompt] = useState<string | null>(null);
@@ -415,9 +425,26 @@ export default function App() {
     setActiveCreationId(item.id);
   }, []);
 
+  const reportSafeError = useCallback(
+    (err: unknown, fallback: string) => {
+      const safe = redactSecrets(err instanceof Error ? err.message : fallback) || fallback;
+      setErrorMessage(safe);
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationError');
+      }
+    },
+    [voiceLanguageId, voiceReadbackEnabled]
+  );
+
   const handleEnhancePrompt = async () => {
     const trimmed = prompt.trim();
     if (!trimmed || isEnhancing) return;
+
+    const promptSafety = validateSafePromptAndScript(trimmed, 'Prompt');
+    if (!promptSafety.safe) {
+      setErrorMessage(promptSafety.reason || 'Blocked unsafe prompt input.');
+      return;
+    }
 
     setIsEnhancing(true);
     setErrorMessage(null);
@@ -540,7 +567,7 @@ export default function App() {
         return;
       }
 
-      setErrorMessage(err instanceof Error ? err.message : 'Prompt enhancement failed.');
+      reportSafeError(err, 'Prompt enhancement failed.');
     } finally {
       setIsEnhancing(false);
     }
@@ -829,10 +856,11 @@ export default function App() {
       };
 
       await persistNewCreation(item);
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+      }
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Lip-Sync video rendering failed.'
-      );
+      reportSafeError(err, 'Lip-Sync video rendering failed.');
     } finally {
       stopTimer();
       setIsLivePreviewActive(false);
@@ -1158,10 +1186,11 @@ export default function App() {
 
         await persistNewCreation(fallbackItem);
       }
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+      }
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Video generation failed.'
-      );
+      reportSafeError(err, 'Video generation failed.');
     } finally {
       stopTimer();
       setIsLivePreviewActive(false);
@@ -1169,11 +1198,31 @@ export default function App() {
     }
   };
 
-  const runLifetimeFreeGeneration = async () => {
-    const trimmedPrompt = prompt.trim();
-    if (!trimmedPrompt || progress.active) return;
+  const runLifetimeFreeGeneration = async (overridePrompt?: string) => {
+    const rawPrompt = (overridePrompt ?? prompt).trim();
+    if (!rawPrompt || progress.active) return;
 
+    const safety = validateSafePromptAndScript(rawPrompt, 'Prompt');
+    if (!safety.safe) {
+      setErrorMessage(safety.reason || 'Blocked unsafe prompt.');
+      return;
+    }
+    const captionSafety = validateSafePromptAndScript(lifetimeCaption, 'Caption');
+    if (!captionSafety.safe) {
+      setErrorMessage(captionSafety.reason || 'Blocked unsafe caption text.');
+      return;
+    }
+    const rate = tryAcquire('generation');
+    if (!rate.allowed) {
+      setErrorMessage(rate.reason || 'Rate limit active.');
+      return;
+    }
+
+    const trimmedPrompt = safety.sanitized.trim();
     setErrorMessage(null);
+    if (voiceReadbackEnabled) {
+      void speakVoiceConfirmation(voiceLanguageId, 'generationStarted');
+    }
 
     if (lifetimeSubTab === 'generate-image') {
       startTimer('Starting Jatt Lifetime Free Image Engine (zero API keys)...');
@@ -1211,10 +1260,11 @@ export default function App() {
         };
 
         await persistNewCreation(item);
+        if (voiceReadbackEnabled) {
+          void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+        }
       } catch (err) {
-        setErrorMessage(
-          err instanceof Error ? err.message : 'Lifetime Free image generation failed.'
-        );
+        reportSafeError(err, 'Lifetime Free image generation failed.');
       } finally {
         stopTimer();
         setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
@@ -1226,7 +1276,7 @@ export default function App() {
     try {
       const rendered = await renderLifetimeFreeVideo({
         prompt: trimmedPrompt,
-        captionText: lifetimeCaption,
+        captionText: captionSafety.sanitized,
         aspectRatio,
         style: stylePreset,
         duration,
@@ -1284,10 +1334,11 @@ export default function App() {
       };
 
       await persistNewCreation(item);
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+      }
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Client-side video synthesis failed.'
-      );
+      reportSafeError(err, 'Client-side video synthesis failed.');
     } finally {
       stopTimer();
       setIsLivePreviewActive(false);
@@ -1295,9 +1346,33 @@ export default function App() {
     }
   };
 
-  const runFilmDirector = async () => {
+  const runFilmDirector = async (overrideShots?: FilmDialogueShot[]) => {
     if (progress.active) return;
+    const shotsToRender = overrideShots ?? filmShots;
+
+    const settingSafety = validateSafePromptAndScript(filmSceneSetting, 'Scene location');
+    if (!settingSafety.safe) {
+      setErrorMessage(settingSafety.reason || 'Blocked unsafe scene description.');
+      return;
+    }
+    for (const shot of shotsToRender) {
+      const shotSafety = validateSafePromptAndScript(shot.dialogue, 'Dialogue line');
+      if (!shotSafety.safe) {
+        setErrorMessage(shotSafety.reason || 'Blocked unsafe dialogue line.');
+        return;
+      }
+    }
+    const rate = tryAcquire('film sequence');
+    if (!rate.allowed) {
+      setErrorMessage(rate.reason || 'Rate limit active.');
+      return;
+    }
+
     setErrorMessage(null);
+    if (voiceReadbackEnabled) {
+      const firstSpeakerChar = filmCharacters.find((c) => c.id === shotsToRender[0]?.characterId);
+      void speakVoiceConfirmation(firstSpeakerChar?.languageId || voiceLanguageId, 'generationStarted');
+    }
     startTimer('Preparing Multi-Character Film Scene & Cast Voices...');
 
     const activeTogetherKey = (engineVaultKeys.togetherKey || envTogether).trim();
@@ -1307,9 +1382,12 @@ export default function App() {
 
     try {
       const rendered = await renderFilmDirectorSequence({
-        sceneSetting: filmSceneSetting,
+        sceneSetting: settingSafety.sanitized,
         characters: filmCharacters,
-        shots: filmShots,
+        shots: shotsToRender.map((s) => ({
+          ...s,
+          dialogue: validateSafePromptAndScript(s.dialogue, 'Dialogue').sanitized,
+        })),
         showSubtitles: filmShowSubtitles,
         transitionStyle: filmTransition,
         ambienceMood: filmAmbience,
@@ -1346,13 +1424,13 @@ export default function App() {
       });
 
       const firstLine =
-        filmShots.find((s) => s.dialogue.trim())?.dialogue.trim() ||
+        shotsToRender.find((s) => s.dialogue.trim())?.dialogue.trim() ||
         'Multi-Character Film Scene';
       const item: CreationItem = {
         id: crypto.randomUUID(),
         kind: 'video',
         sourceMode: 'film-director',
-        prompt: `${filmSceneSetting ? `${filmSceneSetting} — ` : ''}${firstLine}`,
+        prompt: `${settingSafety.sanitized ? `${settingSafety.sanitized} — ` : ''}${firstLine}`,
         style: stylePreset,
         aspectRatio,
         width: rendered.width,
@@ -1370,10 +1448,12 @@ export default function App() {
       };
 
       await persistNewCreation(item);
+      if (voiceReadbackEnabled) {
+        const firstSpeakerChar = filmCharacters.find((c) => c.id === shotsToRender[0]?.characterId);
+        void speakVoiceConfirmation(firstSpeakerChar?.languageId || voiceLanguageId, 'generationSuccess');
+      }
     } catch (err) {
-      setErrorMessage(
-        err instanceof Error ? err.message : 'Film dialogue rendering failed.'
-      );
+      reportSafeError(err, 'Film dialogue rendering failed.');
     } finally {
       stopTimer();
       setIsLivePreviewActive(false);
@@ -1381,19 +1461,46 @@ export default function App() {
     }
   };
 
-  const handleGenerate = async () => {
+  const handleGenerate = async (overridePrompt?: string) => {
     if (activeTab === 'creations' || progress.active) return;
     if (activeTab === 'lifetime-free') {
-      await runLifetimeFreeGeneration();
+      await runLifetimeFreeGeneration(overridePrompt);
       return;
     }
     if (activeTab === 'film-director') {
       await runFilmDirector();
       return;
     }
-    const trimmedPrompt = prompt.trim();
+    const rawPrompt = (overridePrompt ?? prompt).trim();
+
+    if (rawPrompt) {
+      const safety = validateSafePromptAndScript(rawPrompt, 'Prompt');
+      if (!safety.safe) {
+        setErrorMessage(safety.reason || 'Blocked unsafe input.');
+        return;
+      }
+    }
+
+    if (videoSourceMode === 'custom-backend' && activeTab !== 'text-to-image' && activeTab !== 'lip-sync') {
+      const urlCheck = validateExternalEndpointUrl(customBackendUrl);
+      if (!urlCheck.valid) {
+        setErrorMessage(urlCheck.reason || 'Invalid custom backend URL.');
+        return;
+      }
+    }
+
+    const rate = tryAcquire('generation');
+    if (!rate.allowed) {
+      setErrorMessage(rate.reason || 'Rate limit active.');
+      return;
+    }
+
+    const trimmedPrompt = validateSafePromptAndScript(rawPrompt, 'Prompt').sanitized.trim();
 
     if (activeTab === 'lip-sync') {
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationStarted');
+      }
       await runLipSyncVideo(trimmedPrompt);
       return;
     }
@@ -1401,6 +1508,9 @@ export default function App() {
     if (!trimmedPrompt) return;
 
     setErrorMessage(null);
+    if (voiceReadbackEnabled) {
+      void speakVoiceConfirmation(voiceLanguageId, 'generationStarted');
+    }
 
     // Direct frontend Multi-Provider Free AI Image Waterfall (blocks rate-limit/refusal banners)
     if (activeTab === 'text-to-image') {
@@ -1453,11 +1563,13 @@ export default function App() {
         };
 
         await persistNewCreation(item);
+        if (voiceReadbackEnabled) {
+          void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+        }
       } catch (err) {
-        setErrorMessage(
-          err instanceof Error
-            ? err.message
-            : 'Could not generate image from free AI providers. Please try again.'
+        reportSafeError(
+          err,
+          'Could not generate image from free AI providers. Please try again.'
         );
       } finally {
         stopTimer();
@@ -1577,9 +1689,12 @@ export default function App() {
       };
 
       await persistNewCreation(item);
+      if (voiceReadbackEnabled) {
+        void speakVoiceConfirmation(voiceLanguageId, 'generationSuccess');
+      }
     } catch (err) {
       clearTimeout(proxyStageTimer);
-      setErrorMessage(err instanceof Error ? err.message : 'Custom video request failed.');
+      reportSafeError(err, 'Custom video request failed.');
     } finally {
       stopTimer();
       setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
@@ -1790,8 +1905,9 @@ export default function App() {
                     onKeyframeSourceChange={setLifetimeKeyframeSource}
                     offlineImageMode={lifetimeOfflineImageMode}
                     onOfflineImageModeChange={setLifetimeOfflineImageMode}
+                    cooldownSeconds={cooldownSeconds}
                     isGenerating={progress.active}
-                    onGenerate={runLifetimeFreeGeneration}
+                    onGenerate={() => runLifetimeFreeGeneration()}
                   />
                 ) : activeTab === 'film-director' ? (
                   <FilmDirectorPanel
@@ -1816,6 +1932,14 @@ export default function App() {
                     isGenerating={progress.active}
                     progressPercent={progress.percent}
                     togetherKey={(engineVaultKeys.togetherKey || envTogether).trim() || undefined}
+                    groqKey={(engineVaultKeys.groqKey || envGroq).trim() || undefined}
+                    openRouterKey={(engineVaultKeys.openRouterKey || envOpenRouter).trim() || undefined}
+                    voiceAutoGenerate={voiceAutoGenerate}
+                    onVoiceAutoGenerateChange={setVoiceAutoGenerate}
+                    voiceReadbackEnabled={voiceReadbackEnabled}
+                    onVoiceReadbackChange={setVoiceReadbackEnabled}
+                    cooldownSeconds={cooldownSeconds}
+                    onSecurityAlert={(msg) => setErrorMessage(redactSecrets(msg))}
                     onRenderFilm={runFilmDirector}
                   />
                 ) : (
@@ -1907,6 +2031,12 @@ export default function App() {
                     recentImages={recentImages}
                     characterFaceLock={characterFaceLock}
                     onCharacterFaceLockChange={setCharacterFaceLock}
+                    voiceAutoGenerate={voiceAutoGenerate}
+                    onVoiceAutoGenerateChange={setVoiceAutoGenerate}
+                    voiceReadbackEnabled={voiceReadbackEnabled}
+                    onVoiceReadbackChange={setVoiceReadbackEnabled}
+                    cooldownSeconds={cooldownSeconds}
+                    onSecurityAlert={(msg) => setErrorMessage(redactSecrets(msg))}
                     isGenerating={progress.active}
                     onGenerate={handleGenerate}
                   />
