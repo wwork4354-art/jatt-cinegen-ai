@@ -7,12 +7,17 @@ import { CreationsGallery } from './components/CreationsGallery';
 import { ShareModal } from './components/ShareModal';
 import { DeveloperFooter } from './components/DeveloperFooter';
 import { EngineVaultModal } from './components/EngineVaultModal';
+import { JattLifetimeStudio } from './components/JattLifetimeStudio';
 import { dataUrlToBlob, deleteCreation, loadCreations, saveCreation } from './lib/creationsDb';
 import {
   runDirectBrowserAiVideo,
   runDirectBrowserLipSync,
 } from './lib/clientGpuVideo';
 import { fetchFreeAiImageWithWaterfall } from './lib/freeImageWaterfall';
+import {
+  generateLifetimeFreeImage,
+  renderLifetimeFreeVideo,
+} from './lib/lifetimeFreeEngine';
 import { renderAnimatedPollinationsFallback } from './lib/animatedPollinationsFallback';
 import { enhanceTextToVideoPromptFraming } from '../shared/videoPromptFraming';
 import { getLanguageMeta, getUIStrings, type LanguageCode } from './lib/i18n';
@@ -25,6 +30,11 @@ import {
   type DeveloperProfile,
   type EngineVaultKeys,
   type GenerationProgress,
+  type LifetimeCaptionStyle,
+  type LifetimeKeyframeSource,
+  type LifetimeParticleStyle,
+  type LifetimeSoundtrackMood,
+  type LifetimeStudioSubTab,
   type StudioTab,
   type StylePresetId,
   type VideoDuration,
@@ -145,6 +155,17 @@ export default function App() {
   const [uploadedImageUrl, setUploadedImageUrl] = useState<string | null>(null);
   const [lipSyncAudioMode, setLipSyncAudioMode] = useState<'upload' | 'tts'>('tts');
   const [lipSyncAudioFile, setLipSyncAudioFile] = useState<File | null>(null);
+  const [lifetimeSubTab, setLifetimeSubTab] = useState<LifetimeStudioSubTab>('generate-image');
+  const [lifetimeCaption, setLifetimeCaption] = useState('');
+  const [lifetimeParticleStyle, setLifetimeParticleStyle] =
+    useState<LifetimeParticleStyle>('cyber-dust');
+  const [lifetimeCaptionStyle, setLifetimeCaptionStyle] =
+    useState<LifetimeCaptionStyle>('cinema-fade');
+  const [lifetimeSoundtrackMood, setLifetimeSoundtrackMood] =
+    useState<LifetimeSoundtrackMood>('ambient-pad');
+  const [lifetimeKeyframeSource, setLifetimeKeyframeSource] =
+    useState<LifetimeKeyframeSource>('ai-pollinations');
+  const [lifetimeOfflineImageMode, setLifetimeOfflineImageMode] = useState(false);
   const [developerProfile, setDeveloperProfile] = useState<DeveloperProfile>(() => {
     try {
       const saved = localStorage.getItem(DEV_PROFILE_STORAGE_KEY);
@@ -1020,8 +1041,138 @@ export default function App() {
     }
   };
 
+  const runLifetimeFreeGeneration = async () => {
+    const trimmedPrompt = prompt.trim();
+    if (!trimmedPrompt || progress.active) return;
+
+    setErrorMessage(null);
+
+    if (lifetimeSubTab === 'generate-image') {
+      startTimer('Starting Jatt Lifetime Free Image Engine (zero API keys)...');
+      try {
+        const result = await generateLifetimeFreeImage({
+          prompt: trimmedPrompt,
+          aspectRatio,
+          style: stylePreset,
+          offlineProceduralOnly: lifetimeOfflineImageMode,
+          onStatus: (msg) => {
+            setProgress((p) => (p.active ? { ...p, percent: 52, statusMessage: msg } : p));
+          },
+        });
+
+        setProgress((p) =>
+          p.active
+            ? { ...p, percent: 94, statusMessage: 'Saving free HD artwork to My Creations...' }
+            : p
+        );
+
+        const item: CreationItem = {
+          id: crypto.randomUUID(),
+          kind: 'image',
+          sourceMode: 'lifetime-free',
+          prompt: trimmedPrompt,
+          style: stylePreset,
+          aspectRatio,
+          width: result.width,
+          height: result.height,
+          engineLabel: result.providerLabel,
+          mediaUrl: result.objectUrl,
+          mimeType: result.blob.type || 'image/jpeg',
+          createdAt: Date.now(),
+          blob: result.blob,
+        };
+
+        await persistNewCreation(item);
+      } catch (err) {
+        setErrorMessage(
+          err instanceof Error ? err.message : 'Lifetime Free image generation failed.'
+        );
+      } finally {
+        stopTimer();
+        setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+      }
+      return;
+    }
+
+    startTimer('Starting 100% Free Client-Side Video & Motion Studio...');
+    try {
+      const rendered = await renderLifetimeFreeVideo({
+        prompt: trimmedPrompt,
+        captionText: lifetimeCaption,
+        aspectRatio,
+        style: stylePreset,
+        duration,
+        quality,
+        cameraMotion,
+        particleStyle: lifetimeParticleStyle,
+        captionStyle: lifetimeCaptionStyle,
+        soundtrackMood: lifetimeSoundtrackMood,
+        keyframeSource: lifetimeKeyframeSource,
+        onFrameCanvas: (sourceCanvas) => {
+          setIsLivePreviewActive((prev) => (prev ? prev : true));
+          const target = liveCanvasRef.current;
+          if (!target) return;
+          const maxPreviewSide = 1280;
+          const scale = Math.min(
+            1,
+            maxPreviewSide / Math.max(sourceCanvas.width, sourceCanvas.height)
+          );
+          const previewW = Math.round(sourceCanvas.width * scale);
+          const previewH = Math.round(sourceCanvas.height * scale);
+          if (target.width !== previewW || target.height !== previewH) {
+            target.width = previewW;
+            target.height = previewH;
+          }
+          const tctx = target.getContext('2d');
+          if (tctx) {
+            tctx.drawImage(sourceCanvas, 0, 0, previewW, previewH);
+          }
+        },
+        onProgress: (percent, statusMessage, remainingSeconds) => {
+          setProgress((p) =>
+            p.active ? { ...p, percent, statusMessage, remainingSeconds } : p
+          );
+        },
+      });
+
+      const item: CreationItem = {
+        id: crypto.randomUUID(),
+        kind: 'video',
+        sourceMode: 'lifetime-free',
+        prompt: trimmedPrompt,
+        style: stylePreset,
+        aspectRatio,
+        width: rendered.width,
+        height: rendered.height,
+        duration,
+        cameraMotion,
+        quality,
+        engineLabel: rendered.engineLabel,
+        scenes: rendered.scenes,
+        mediaUrl: rendered.mediaUrl,
+        mimeType: rendered.mimeType,
+        createdAt: Date.now(),
+        blob: rendered.blob,
+      };
+
+      await persistNewCreation(item);
+    } catch (err) {
+      setErrorMessage(
+        err instanceof Error ? err.message : 'Client-side video synthesis failed.'
+      );
+    } finally {
+      stopTimer();
+      setIsLivePreviewActive(false);
+      setProgress({ active: false, percent: 0, statusMessage: '', elapsedSeconds: 0 });
+    }
+  };
+
   const handleGenerate = async () => {
     if (activeTab === 'creations' || progress.active) return;
+    if (activeTab === 'lifetime-free') {
+      await runLifetimeFreeGeneration();
+      return;
+    }
     const trimmedPrompt = prompt.trim();
 
     if (activeTab === 'lip-sync') {
@@ -1274,9 +1425,13 @@ export default function App() {
       item.sourceMode === 'text-to-image' ||
       item.sourceMode === 'image-to-video' ||
       item.sourceMode === 'lip-sync' ||
-      item.sourceMode === 'text-to-video'
+      item.sourceMode === 'text-to-video' ||
+      item.sourceMode === 'lifetime-free'
         ? item.sourceMode
         : 'text-to-video';
+    if (validTab === 'lifetime-free') {
+      setLifetimeSubTab(item.kind === 'image' ? 'generate-image' : 'generate-video');
+    }
     setActiveTab(validTab);
   }, []);
 
@@ -1377,94 +1532,128 @@ export default function App() {
             {/* Primary 2-Column Generation Studio */}
             <div className="flex flex-col gap-6 lg:flex-row lg:items-stretch">
               <div className="w-full lg:w-[460px] xl:w-[490px] shrink-0">
-                <PromptPanel
-                  mode={activeTab}
-                  language={language}
-                  onLanguageChange={setLanguage}
-                  voiceLanguageId={voiceLanguageId}
-                  onVoiceLanguageChange={setVoiceLanguageId}
-                  strings={strings}
-                  prompt={prompt}
-                  onPromptChange={setPrompt}
-                  previousPrompt={previousPrompt}
-                  onUndoEnhance={() => {
-                    if (previousPrompt !== null) {
-                      setPrompt(previousPrompt);
-                      setPreviousPrompt(null);
-                    }
-                  }}
-                  onEnhancePrompt={handleEnhancePrompt}
-                  isEnhancing={isEnhancing}
-                  aspectRatio={aspectRatio}
-                  onAspectRatioChange={setAspectRatio}
-                  stylePreset={stylePreset}
-                  onStylePresetChange={setStylePreset}
-                  duration={duration}
-                  onDurationChange={setDuration}
-                  cameraMotion={cameraMotion}
-                  onCameraMotionChange={setCameraMotion}
-                  quality={quality}
-                  onQualityChange={setQuality}
-                  voiceoverEnabled={voiceoverEnabled}
-                  onVoiceoverChange={setVoiceoverEnabled}
-                  backgroundMusicFile={backgroundMusicFile}
-                  onBackgroundMusicChange={setBackgroundMusicFile}
-                  videoSourceMode={videoSourceMode}
-                  onVideoSourceModeChange={setVideoSourceMode}
-                  hfToken={engineVaultKeys.hfToken || hfToken || envHf}
-                  onHfTokenChange={(nextToken) => {
-                    setHfToken(nextToken);
-                    setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
-                  }}
-                  agnesApiKey={engineVaultKeys.agnesKey || envAgnes}
-                  onAgnesApiKeyChange={(nextKey) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, agnesKey: nextKey }));
-                  }}
-                  falKey={engineVaultKeys.falKey || envFal}
-                  onFalKeyChange={(nextKey) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, falKey: nextKey }));
-                  }}
-                  replicateToken={engineVaultKeys.replicateToken || envReplicate}
-                  onReplicateTokenChange={(nextToken) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, replicateToken: nextToken }));
-                  }}
-                  togetherKey={engineVaultKeys.togetherKey || envTogether}
-                  onTogetherKeyChange={(nextKey) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, togetherKey: nextKey }));
-                  }}
-                  groqKey={engineVaultKeys.groqKey || envGroq}
-                  onGroqKeyChange={(nextKey) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, groqKey: nextKey }));
-                  }}
-                  openRouterKey={engineVaultKeys.openRouterKey || envOpenRouter}
-                  onOpenRouterKeyChange={(nextKey) => {
-                    setEngineVaultKeys((prev) => ({ ...prev, openRouterKey: nextKey }));
-                  }}
-                  hasGpuKeys={Boolean(
-                    (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
-                      (engineVaultKeys.siliconFlowKey || envSf).trim() ||
-                      (engineVaultKeys.agnesKey || envAgnes).trim() ||
-                      (engineVaultKeys.falKey || envFal).trim() ||
-                      (engineVaultKeys.replicateToken || envReplicate).trim() ||
-                      (engineVaultKeys.geminiKey || envGemini).trim()
-                  )}
-                  onOpenEngineVault={() => setIsEngineVaultOpen(true)}
-                  customBackendUrl={customBackendUrl}
-                  onCustomBackendUrlChange={setCustomBackendUrl}
-                  uploadedImageUrl={uploadedImageUrl}
-                  onUploadedImageChange={setUploadedImageUrl}
-                  lipSyncAudioMode={lipSyncAudioMode}
-                  onLipSyncAudioModeChange={setLipSyncAudioMode}
-                  lipSyncAudioFile={lipSyncAudioFile}
-                  onLipSyncAudioFileChange={setLipSyncAudioFile}
-                  recentImages={recentImages}
-                  isGenerating={progress.active}
-                  onGenerate={handleGenerate}
-                />
+                {activeTab === 'lifetime-free' ? (
+                  <JattLifetimeStudio
+                    subTab={lifetimeSubTab}
+                    onSubTabChange={setLifetimeSubTab}
+                    prompt={prompt}
+                    onPromptChange={setPrompt}
+                    captionText={lifetimeCaption}
+                    onCaptionTextChange={setLifetimeCaption}
+                    aspectRatio={aspectRatio}
+                    onAspectRatioChange={setAspectRatio}
+                    stylePreset={stylePreset}
+                    onStylePresetChange={setStylePreset}
+                    duration={duration}
+                    onDurationChange={setDuration}
+                    quality={quality}
+                    onQualityChange={setQuality}
+                    cameraMotion={cameraMotion}
+                    onCameraMotionChange={setCameraMotion}
+                    particleStyle={lifetimeParticleStyle}
+                    onParticleStyleChange={setLifetimeParticleStyle}
+                    captionStyle={lifetimeCaptionStyle}
+                    onCaptionStyleChange={setLifetimeCaptionStyle}
+                    soundtrackMood={lifetimeSoundtrackMood}
+                    onSoundtrackMoodChange={setLifetimeSoundtrackMood}
+                    keyframeSource={lifetimeKeyframeSource}
+                    onKeyframeSourceChange={setLifetimeKeyframeSource}
+                    offlineImageMode={lifetimeOfflineImageMode}
+                    onOfflineImageModeChange={setLifetimeOfflineImageMode}
+                    isGenerating={progress.active}
+                    onGenerate={runLifetimeFreeGeneration}
+                  />
+                ) : (
+                  <PromptPanel
+                    mode={activeTab}
+                    language={language}
+                    onLanguageChange={setLanguage}
+                    voiceLanguageId={voiceLanguageId}
+                    onVoiceLanguageChange={setVoiceLanguageId}
+                    strings={strings}
+                    prompt={prompt}
+                    onPromptChange={setPrompt}
+                    previousPrompt={previousPrompt}
+                    onUndoEnhance={() => {
+                      if (previousPrompt !== null) {
+                        setPrompt(previousPrompt);
+                        setPreviousPrompt(null);
+                      }
+                    }}
+                    onEnhancePrompt={handleEnhancePrompt}
+                    isEnhancing={isEnhancing}
+                    aspectRatio={aspectRatio}
+                    onAspectRatioChange={setAspectRatio}
+                    stylePreset={stylePreset}
+                    onStylePresetChange={setStylePreset}
+                    duration={duration}
+                    onDurationChange={setDuration}
+                    cameraMotion={cameraMotion}
+                    onCameraMotionChange={setCameraMotion}
+                    quality={quality}
+                    onQualityChange={setQuality}
+                    voiceoverEnabled={voiceoverEnabled}
+                    onVoiceoverChange={setVoiceoverEnabled}
+                    backgroundMusicFile={backgroundMusicFile}
+                    onBackgroundMusicChange={setBackgroundMusicFile}
+                    videoSourceMode={videoSourceMode}
+                    onVideoSourceModeChange={setVideoSourceMode}
+                    hfToken={engineVaultKeys.hfToken || hfToken || envHf}
+                    onHfTokenChange={(nextToken) => {
+                      setHfToken(nextToken);
+                      setEngineVaultKeys((prev) => ({ ...prev, hfToken: nextToken }));
+                    }}
+                    agnesApiKey={engineVaultKeys.agnesKey || envAgnes}
+                    onAgnesApiKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, agnesKey: nextKey }));
+                    }}
+                    falKey={engineVaultKeys.falKey || envFal}
+                    onFalKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, falKey: nextKey }));
+                    }}
+                    replicateToken={engineVaultKeys.replicateToken || envReplicate}
+                    onReplicateTokenChange={(nextToken) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, replicateToken: nextToken }));
+                    }}
+                    togetherKey={engineVaultKeys.togetherKey || envTogether}
+                    onTogetherKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, togetherKey: nextKey }));
+                    }}
+                    groqKey={engineVaultKeys.groqKey || envGroq}
+                    onGroqKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, groqKey: nextKey }));
+                    }}
+                    openRouterKey={engineVaultKeys.openRouterKey || envOpenRouter}
+                    onOpenRouterKeyChange={(nextKey) => {
+                      setEngineVaultKeys((prev) => ({ ...prev, openRouterKey: nextKey }));
+                    }}
+                    hasGpuKeys={Boolean(
+                      (engineVaultKeys.hfToken || hfToken || envHf).trim() ||
+                        (engineVaultKeys.siliconFlowKey || envSf).trim() ||
+                        (engineVaultKeys.agnesKey || envAgnes).trim() ||
+                        (engineVaultKeys.falKey || envFal).trim() ||
+                        (engineVaultKeys.replicateToken || envReplicate).trim() ||
+                        (engineVaultKeys.geminiKey || envGemini).trim()
+                    )}
+                    onOpenEngineVault={() => setIsEngineVaultOpen(true)}
+                    customBackendUrl={customBackendUrl}
+                    onCustomBackendUrlChange={setCustomBackendUrl}
+                    uploadedImageUrl={uploadedImageUrl}
+                    onUploadedImageChange={setUploadedImageUrl}
+                    lipSyncAudioMode={lipSyncAudioMode}
+                    onLipSyncAudioModeChange={setLipSyncAudioMode}
+                    lipSyncAudioFile={lipSyncAudioFile}
+                    onLipSyncAudioFileChange={setLipSyncAudioFile}
+                    recentImages={recentImages}
+                    isGenerating={progress.active}
+                    onGenerate={handleGenerate}
+                  />
+                )}
               </div>
 
               <PreviewStage
                 mode={activeTab}
+                lifetimeSubTab={lifetimeSubTab}
                 aspectRatio={aspectRatio}
                 progress={progress}
                 activeCreation={activeCreation}

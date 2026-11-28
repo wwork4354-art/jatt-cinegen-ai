@@ -3,7 +3,18 @@ export type StudioTab =
   | 'image-to-video'
   | 'lip-sync'
   | 'text-to-image'
+  | 'lifetime-free'
   | 'creations';
+
+export type LifetimeStudioSubTab = 'generate-image' | 'generate-video';
+
+export type LifetimeParticleStyle = 'cyber-dust' | 'golden-embers' | 'starlight' | 'none';
+
+export type LifetimeCaptionStyle = 'cinema-fade' | 'typewriter' | 'neon-bar' | 'none';
+
+export type LifetimeSoundtrackMood = 'ambient-pad' | 'warm-horizon' | 'cyber-pulse' | 'silent';
+
+export type LifetimeKeyframeSource = 'ai-pollinations' | 'offline-procedural';
 
 export type AspectRatio = '16:9' | '9:16' | '1:1';
 
@@ -59,7 +70,7 @@ export interface CameraMotionOption {
 export interface CreationItem {
   id: string;
   kind: 'image' | 'video';
-  sourceMode: 'text-to-image' | 'text-to-video' | 'image-to-video' | 'lip-sync';
+  sourceMode: 'text-to-image' | 'text-to-video' | 'image-to-video' | 'lip-sync' | 'lifetime-free';
   prompt: string;
   style: StylePresetId;
   aspectRatio: AspectRatio;

@@ -17,11 +17,13 @@ import {
   type AspectRatio,
   type CreationItem,
   type GenerationProgress,
+  type LifetimeStudioSubTab,
   type StudioTab,
 } from '../types/studio';
 
 interface PreviewStageProps {
   mode: Exclude<StudioTab, 'creations'>;
+  lifetimeSubTab?: LifetimeStudioSubTab;
   aspectRatio: AspectRatio;
   progress: GenerationProgress;
   activeCreation: CreationItem | null;
@@ -41,6 +43,7 @@ interface PreviewStageProps {
 
 export function PreviewStage({
   mode,
+  lifetimeSubTab = 'generate-image',
   aspectRatio,
   progress,
   activeCreation,
@@ -149,7 +152,8 @@ export function PreviewStage({
           ) : (
             <div className="w-full max-w-md space-y-5 text-center">
               <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-400/10 text-cyan-300">
-                {mode === 'text-to-image' ? (
+                {mode === 'text-to-image' ||
+                (mode === 'lifetime-free' && lifetimeSubTab === 'generate-image') ? (
                   <ImageIcon className="h-6 w-6" />
                 ) : mode === 'lip-sync' ? (
                   <Mic className="h-6 w-6" />
@@ -242,7 +246,8 @@ export function PreviewStage({
                   : 'h-32 w-56'
               }`}
             >
-              {mode === 'text-to-image' ? (
+              {mode === 'text-to-image' ||
+              (mode === 'lifetime-free' && lifetimeSubTab === 'generate-image') ? (
                 <ImageIcon className="h-7 w-7 text-slate-600" />
               ) : mode === 'lip-sync' ? (
                 <Mic className="h-7 w-7 text-slate-600" />
@@ -252,14 +257,20 @@ export function PreviewStage({
             </div>
             <div className="space-y-1">
               <h2 className="font-display text-lg font-semibold text-slate-200">
-                {mode === 'text-to-image'
+                {mode === 'lifetime-free'
+                  ? lifetimeSubTab === 'generate-image'
+                    ? 'Jatt Lifetime Free Image Engine'
+                    : 'Jatt Lifetime Client-Side Motion Studio'
+                  : mode === 'text-to-image'
                   ? strings.readyImageTitle
                   : mode === 'lip-sync'
                   ? 'Ready for Talking & Singing Photo'
                   : strings.readyVideoTitle}
               </h2>
               <p className="text-xs leading-relaxed text-slate-500">
-                {mode === 'lip-sync'
+                {mode === 'lifetime-free'
+                  ? '100% free forever with zero API keys, zero login, and zero monthly billing.'
+                  : mode === 'lip-sync'
                   ? 'Upload any portrait photo + song or typed speech in 15 languages to animate it for free.'
                   : strings.readySubtitle}
               </p>

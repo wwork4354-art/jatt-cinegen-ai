@@ -28,6 +28,7 @@ export function TopNav({
     { id: 'image-to-video', label: strings.navImageToVideo },
     { id: 'lip-sync', label: strings.navLipSync },
     { id: 'text-to-image', label: strings.navTextToImage },
+    { id: 'lifetime-free', label: strings.navLifetimeFree },
     { id: 'creations', label: strings.navMyCreations },
   ];
 
@@ -44,7 +45,7 @@ export function TopNav({
             Jatt CineGen AI
           </button>
 
-          <span className="hidden xl:inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-200 whitespace-nowrap shrink-0">
+          <span className="hidden 2xl:inline-flex items-center gap-1.5 rounded-lg border border-cyan-400/25 bg-cyan-400/10 px-2 py-1 text-[11px] font-medium text-cyan-200 whitespace-nowrap shrink-0">
             <img
               src={developerAvatarUrl || '/creator-avatar.png'}
               alt="Jatt Official"
@@ -57,7 +58,7 @@ export function TopNav({
         {/* Zone 2: Concise Single-Line Navigation Links */}
         <nav
           aria-label="Studio modes"
-          className="hidden md:flex items-center gap-4 lg:gap-6"
+          className="hidden xl:flex items-center gap-4 2xl:gap-5"
         >
           {navItems.map((item) => {
             const isActive = activeTab === item.id;
@@ -116,10 +117,10 @@ export function TopNav({
         </div>
       </div>
 
-      {/* Compact Mobile Navigation Row */}
+      {/* Compact Mobile & Tablet Navigation Row */}
       <nav
         aria-label="Mobile studio modes"
-        className="flex md:hidden items-center gap-1 overflow-x-auto border-t border-white/[0.06] px-4 py-1.5"
+        className="flex xl:hidden items-center gap-1 overflow-x-auto border-t border-white/[0.06] px-4 py-1.5"
       >
         {navItems.map((item) => {
           const isActive = activeTab === item.id;

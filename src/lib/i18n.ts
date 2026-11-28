@@ -42,6 +42,7 @@ export interface UIStrings {
   navImageToVideo: string;
   navLipSync: string;
   navTextToImage: string;
+  navLifetimeFree: string;
   navMyCreations: string;
   newCanvas: string;
   languageLabel: string;
@@ -96,6 +97,7 @@ const EN: UIStrings = {
   navImageToVideo: 'Image to Video',
   navLipSync: 'AI Lip-Sync / Singing Photo',
   navTextToImage: 'Text to Image',
+  navLifetimeFree: 'Lifetime Free',
   navMyCreations: 'My Creations',
   newCanvas: 'New Canvas',
   languageLabel: 'Language',

@@ -43,7 +43,7 @@ import {
 } from '../types/studio';
 
 interface PromptPanelProps {
-  mode: Exclude<StudioTab, 'creations'>;
+  mode: Exclude<StudioTab, 'creations' | 'lifetime-free'>;
   language: LanguageCode;
   onLanguageChange: (code: LanguageCode) => void;
   voiceLanguageId: string;
@@ -129,7 +129,7 @@ interface SpeechRecognitionInstanceLike {
   stop: () => void;
 }
 
-const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations'>, string[]> = {
+const SAMPLE_PROMPTS: Record<Exclude<StudioTab, 'creations' | 'lifetime-free'>, string[]> = {
   'text-to-video': [
     'A majestic lion walking in a glowing cyberpunk jungle at sunset',
     'Slow aerial reveal over volcanic black sand beaches with rolling surf',
